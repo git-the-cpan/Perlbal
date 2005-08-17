@@ -29,14 +29,16 @@ use constant TRACK_STATES => $ENV{PERLBAL_TRACK_STATES} || 0; # if on, track sta
 
 use strict;
 use warnings;
+no  warnings qw(deprecated);
+
 use IO::Socket;
 use IO::Handle;
 use IO::File;
 
 # Try and use IO::AIO or Linux::AIO, if it's around.
 BEGIN {
-    $Perlbal::OPTMOD_IO_AIO    = eval "use IO::AIO (); 1;";
-    $Perlbal::OPTMOD_LINUX_AIO = eval "use Linux::AIO '1.3'; 1;";
+    $Perlbal::OPTMOD_IO_AIO        = eval "use IO::AIO (); 1;";
+    $Perlbal::OPTMOD_LINUX_AIO     = eval "use Linux::AIO 1.3; 1;";
 }
 
 $Perlbal::AIO_MODE = "none";
@@ -65,6 +67,7 @@ use Perlbal::ReproxyManager;
 use Perlbal::Pool;
 use Perlbal::ManageCommand;
 use Perlbal::CommandContext;
+use Perlbal::Util;
 
 END {
     Linux::AIO::max_parallel(0)
@@ -86,6 +89,8 @@ our $track_obj = 0;  # default to not track creation locations
 our $reqs = 0; # total number of requests we've done
 our $starttime = time(); # time we started
 our ($lastutime, $laststime, $lastreqs) = (0, 0, 0); # for deltas
+
+our %PluginCase = ();   # lowercase plugin name -> as file is named
 
 # setup XS status data structures
 our %XSModules; # ( 'headers' => 'Perlbal::XS::HTTPHeaders' )
@@ -179,6 +184,12 @@ sub service {
 sub pool {
     my $class = shift;
     return $pool{$_[0]};
+}
+
+# given some plugin name, return its correct case
+sub plugin_case {
+    my $pname = lc shift;
+    return $PluginCase{$pname} || $pname;
 }
 
 # run a block of commands.  returns true if they all passed
@@ -857,18 +868,37 @@ sub MANAGE_enable {
 }
 *MANAGE_disable = \&MANAGE_enable;
 
-sub MANAGE_load {
-    my $mc = shift->parse(qr/^(un)?load (\w+)$/);
-    my ($un, $fn) = $mc->args;
-    $un ||= "";
+sub MANAGE_unload {
+    my $mc = shift->parse(qr/^unload (\w+)$/);
+    my ($fn) = $mc->args;
+    $fn = $PluginCase{lc $fn};
+    my $rv = eval "Perlbal::Plugin::$fn->unload; 1;";
+    $plugins{$fn} = 0;
+    return $mc->ok;
+}
 
-    if (length $fn) {
-        # since we lowercase our input, uppercase the first character here
-        $fn = uc($1) . lc($2) if $fn =~ /^(.)(.*)$/;
-        eval "use Perlbal::Plugin::$fn; Perlbal::Plugin::$fn->${un}load;";
-        return $mc->err($@) if $@;
-        $plugins{$fn} = $un ? 0 : 1;
-    }
+sub MANAGE_load {
+    my $mc = shift->parse(qr/^load \w+$/);
+
+    my $fn;
+    $fn = $1 if $mc->orig =~ /^load (\w+)$/i;
+
+    my $last_case;
+
+    my $load = sub {
+        my $name = shift;
+        $last_case = $name;
+        my $rv = eval "use Perlbal::Plugin::$name; Perlbal::Plugin::$name->load; 1;";
+        return $mc->err($@) if ! $rv && $@ !~ /^Can\'t locate/;
+        return $rv;
+    };
+
+    my $rv = $load->($fn) || $load->(lc $fn) || $load->(ucfirst lc $fn);
+    return $mc->err($@) unless $rv;
+
+    $PluginCase{lc $fn} = $last_case;
+    $plugins{$last_case} = 1;
+
     return $mc->ok;
 }
 
@@ -886,8 +916,9 @@ sub load_config {
     open (F, $file) or die "Error opening config file ($file): $!\n";
     my $ctx = Perlbal::CommandContext->new;
     $ctx->verbose(0);
-    while (<F>) {
-        return 0 unless run_manage_command($_, $writer, $ctx);
+    while (my $line = <F>) {
+        $line =~ s/\$(\w+)/$ENV{$1}/g;
+        return 0 unless run_manage_command($line, $writer, $ctx);
     }
     close(F);
     return 1;

@@ -9,6 +9,7 @@
 package Perlbal::Service;
 use strict;
 use warnings;
+no  warnings qw(deprecated);
 
 use Perlbal::BackendHTTP;
 
@@ -66,7 +67,18 @@ use fields (
             'backend_no_spawn', # { "ip:port" => 1 }; if on, spawn_backends will ignore this ip:port combo
             'buffer_backend_connect', # 0 for of, else, number of bytes to buffer before we ask for a backend
             'selector',    # CODE ref, or undef, for role 'selector' services
+            'buffer_uploads', # bool; enable/disable the buffered uploads to disk system
+            'buffer_uploads_path', # string; path to store buffered upload files
+            'buffer_upload_threshold_time', # int; buffer uploads estimated to take longer than this
+            'buffer_upload_threshold_size', # int; buffer uploads greater than this size (in bytes)
+            'buffer_upload_threshold_rate', # int; buffer uploads uploading at less than this rate (in bytes/sec)
+
+            'enable_ssl',         # bool: whether this service speaks SSL to the client
+            'ssl_key_file',       # file:  path to key pem file
+            'ssl_cert_file',      # file:  path to key pem file
+            'ssl_cipher_list',    # OpenSSL cipher list string
             );
+
 
 our $tunables = {
 
@@ -87,7 +99,7 @@ our $tunables = {
     'listen' => {
         check_role => "*",
         des => "The ip:port to listen on.  For a service to work, you must either make it listen, or make another selector service map to a non-listening service.",
-        check_type => ["regexp", qr/^\d+\.\d+\.\d+\.\d+:\d+$!/, "Expecting IP:port of form a.b.c.d:port."],
+        check_type => ["regexp", qr/^\d+\.\d+\.\d+\.\d+:\d+$/, "Expecting IP:port of form a.b.c.d:port."],
         setter => sub {
             my ($self, $val, $set, $mc) = @_;
 
@@ -175,8 +187,8 @@ our $tunables = {
     },
 
     'buffer_backend_connect' => {
-        des => "How much content-body (POST/PUT/etc) data we read from a client before we start sending it to a backend web node.",
-        default => 0,
+        des => "How much content-body (POST/PUT/etc) data we read from a client before we start sending it to a backend web node.  If 'buffer_uploads' is enabled, this value is used to determine how many bytes are read before Perlbal makes a determination on whether or not to spool the upload to disk.",
+        default => '100k',
         check_type => "size",
         check_role => "reverse_proxy",
     },
@@ -304,8 +316,77 @@ our $tunables = {
             # the type-checking phase.  instead, we do nothing here.
             return $mc->ok;
         },
-
     },
+
+    'buffer_uploads_path' => {
+        des => "Directory root for storing files used to buffer uploads.",
+
+        check_role => "reverse_proxy",
+        val_modify => sub { my $valref = shift; $$valref =~ s!/$!!; },
+        check_type => sub {
+            my ($self, $val, $errref) = @_;
+            #FIXME: require absolute paths?
+            return 1 if $val && -d $val;
+            $$errref = "Directory not found for service $self->{name} (buffer_uploads_path)";
+            return 0;
+        },
+    },
+
+    'buffer_uploads' => {
+        des => "Used to enable or disable the buffer uploads to disk system.  If enabled, 'buffer_backend_connect' bytes worth of the upload will be stored in memory.  At that point, the buffer upload thresholds will be checked to see if we should just send this upload to the backend, or if we should spool it to disk.",
+        default => 0,
+        check_role => "reverse_proxy",
+        check_type => "bool",
+    },
+
+    'buffer_upload_threshold_time' => {
+        des => "If an upload is estimated to take more than this number of seconds, it will be buffered to disk.  Set to 0 to not check estimated time.",
+        default => 5,
+        check_role => "reverse_proxy",
+        check_type => "int",
+    },
+
+    'buffer_upload_threshold_size' => {
+        des => "If an upload is larger than this size in bytes, it will be buffered to disk.  Set to 0 to not check size.",
+        default => '250k',
+        check_role => "reverse_proxy",
+        check_type => "size",
+    },
+
+    'buffer_upload_threshold_rate' => {
+        des => "If an upload is coming in at a rate less than this value in bytes per second, it will be buffered to disk.  Set to 0 to not check rate.",
+        default => 0,
+        check_role => "reverse_proxy",
+        check_type => "int",
+    },
+
+    'enable_ssl' => {
+        des => "Enable SSL to the client.",
+        default => 0,
+        check_type => "bool",
+        check_role => "*",
+    },
+
+    'ssl_key_file' => {
+        des => "Path to private key PEM file for SSL.",
+        default => "certs/server-key.pem",
+        check_type => "file_or_none",
+        check_role => "*",
+    },
+
+    'ssl_cert_file' => {
+        des => "Path to certificate PEM file for SSL.",
+        default => "certs/server-cert.pem",
+        check_type => "file_or_none",
+        check_role => "*",
+    },
+
+    'ssl_cipher_list' => {
+        des => "OpenSSL-style cipher list.",
+        default => "ALL:!LOW:!EXP",
+        check_role => "*",
+    },
+
 };
 sub autodoc_get_tunables { return $tunables; }
 
@@ -334,6 +415,9 @@ sub new {
     $self->{waiting_clients} = [];
     $self->{waiting_clients_highpri} = [];
     $self->{waiting_client_count} = 0;
+
+    # buffered upload setup
+    $self->{buffer_uploads_path} = undef;
 
     # don't have an object for this yet
     $self->{trusted_upstreams} = undef;
@@ -434,6 +518,12 @@ sub set {
                 $val = $1 * 1024 * 1024 if $val =~ /^(\d+)m$/i;
                 return $mc->err("Expecting size unit value for parameter '$key' in bytes, or suffixed with 'K' or 'M'")
                     unless $val =~ /^\d+$/;
+            } elsif ($req_type eq "file") {
+                return $mc->err("File '$val' not found for '$key'") unless -f $val;
+            } elsif ($req_type eq "file_or_none") {
+                return $mc->err("File '$val' not found for '$key'") unless -f $val || $val eq $tun->{default};
+            } else {
+                die "Unknown check_type: $req_type\n";
             }
         }
 
@@ -462,8 +552,8 @@ sub set {
         foreach my $plugin (split /[\s,]+/, $val) {
             next if $plugin eq 'none';
 
-            # since we lowercase our input, uppercase the first character here
-            my $fn = uc($1) . lc($2) if $plugin =~ /^(.)(.*)$/;
+            my $fn = Perlbal::plugin_case($plugin);
+
             next if $self->{plugins}->{$fn};
             unless ($Perlbal::plugins{$fn}) {
                 $mc->err("Plugin $fn not loaded; not registered for $self->{name}.");
@@ -796,7 +886,7 @@ sub request_backend_connection {
         my %cookie;
         foreach (split(/;\s+/, $hd->header("Cookie") || '')) {
             next unless ($_ =~ /(.*)=(.*)/);
-            $cookie{_durl($1)} = _durl($2);
+            $cookie{Perlbal::Util::durl($1)} = Perlbal::Util::durl($2);
         }
         my $hicookie = $cookie{$cname} || "";
         $hi_pri = index($hicookie, $self->{high_priority_cookie_contents}) != -1;
@@ -997,6 +1087,8 @@ sub adopt_base_client {
     }
 }
 
+# turn a ClientProxy or ClientHTTP back into a generic base client
+# (for a service-selector role)
 sub return_to_base {
     my Perlbal::Service $self = shift;
     my Perlbal::ClientHTTPBase $cb = shift;  # actually a subclass of Perlbal::ClientHTTPBase
@@ -1004,8 +1096,7 @@ sub return_to_base {
     $cb->{service} = $self;
     bless $cb, "Perlbal::ClientHTTPBase";
 
-    $cb->watch_write(0);
-    $cb->watch_read(1);
+    # the read/watch events are reset by ClientHTTPBase's http_response_sent (our caller)
 }
 
 # Service
@@ -1022,7 +1113,19 @@ sub enable {
 
     # create listening socket
     if ($self->{listen}) {
-        my $tl = Perlbal::TCPListener->new($self->{listen}, $self);
+        my $opts = {};
+        if ($self->{enable_ssl}) {
+            $opts->{ssl} = {
+                SSL_key_file    => $self->{ssl_key_file},
+                SSL_cert_file   => $self->{ssl_cert_file},
+                SSL_cipher_list => $self->{ssl_cipher_list},
+            };
+            return $mc->err("IO::Socket:SSL (0.97+) not available.  Can't do SSL.") unless eval "use IO::Socket::SSL 0.97 (); 1;";
+            return $mc->err("SSL key file ($self->{ssl_key_file}) doesn't exist")   unless -f $self->{ssl_key_file};
+            return $mc->err("SSL cert file ($self->{ssl_cert_file}) doesn't exist") unless -f $self->{ssl_cert_file};
+        }
+
+        my $tl = Perlbal::TCPListener->new($self->{listen}, $self, $opts);
         unless ($tl) {
             $mc && $mc->err("Can't start service '$self->{name}' on $self->{listen}: $Perlbal::last_error");
             return 0;
@@ -1099,14 +1202,16 @@ sub backend_response_received {
     return $_[0]->run_hook('backend_response_received', $_[1]);
 }
 
-sub _durl
-{
-    my ($a) = @_;
-    $a =~ tr/+/ /;
-    $a =~ s/%([a-fA-F0-9][a-fA-F0-9])/pack("C", hex($1))/eg;
-    return $a;
+# just a getter for our name
+sub name {
+    my Perlbal::Service $self = $_[0];
+    return $self->{name};
 }
 
+sub listenaddr {
+    my Perlbal::Service $self = $_[0];
+    return $self->{listen};
+}
 
 1;
 

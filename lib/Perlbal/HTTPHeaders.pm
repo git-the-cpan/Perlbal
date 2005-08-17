@@ -8,6 +8,8 @@
 package Perlbal::HTTPHeaders;
 use strict;
 use warnings;
+no  warnings qw(deprecated);
+
 use fields (
             'headers',   # href; lowercase header -> comma-sep list of values
             'origcase',  # href; lowercase header -> provided case
@@ -321,7 +323,7 @@ sub content_length {
 # whether or not the response from the proxy (us) should do keep-alive.
 sub req_keep_alive {
     my Perlbal::HTTPHeaders $self = $_[0];
-    my Perlbal::HTTPHeaders $res = $_[1];
+    my Perlbal::HTTPHeaders $res = $_[1] or Carp::confess("ASSERT: No response headers given");
 
     # get the connection header now (saves warnings later)
     my $conn = lc ($self->header('Connection') || '');
@@ -340,17 +342,28 @@ sub req_keep_alive {
     # well enough to do keep-alive.  FIXME: support chunked encoding in the
     # future, which means this check changes.
     return 1 if defined $res->header('Content-length') ||
-                $self->request_method eq 'HEAD';
+        $res->response_code == 304 || # not modified
+        $res->response_code == 204 || # no content
+        $self->request_method eq 'HEAD';
 
     # fail-safe, no keep-alive
     return 0;
 }
 
-# answers the question: is the backend expected to stay open.  this is a combination
-# of the request we sent to it and the response they sent...
+# if an options response from a backend looks like it can do keep-alive.
+sub res_keep_alive_options {
+    my Perlbal::HTTPHeaders $self = $_[0];
+    return $self->res_keep_alive(undef, 1);
+}
+
+# answers the question: "is the backend expected to stay open?"  this
+# is a combination of the request we sent to it and the response they
+# sent...
 sub res_keep_alive {
     my Perlbal::HTTPHeaders $self = $_[0];
     my Perlbal::HTTPHeaders $req = $_[1];
+    my $is_options = $_[2];
+    Carp::confess("ASSERT: No request headers given") unless $req || $is_options;
 
     # get the connection header now (saves warnings later)
     my $conn = lc ($self->header('Connection') || '');
@@ -364,7 +377,8 @@ sub res_keep_alive {
         # the request must be a head request
         return 1 if
             $conn =~ /\bkeep-alive\b/i &&
-            (defined $self->header('Content-length') ||
+            ($is_options ||
+             defined $self->header('Content-length') ||
              $req->request_method eq 'HEAD');
         return 0;
     }

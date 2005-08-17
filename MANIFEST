@@ -3,6 +3,7 @@ MANIFEST
 CHANGES
 perlbal
 lib/Perlbal.pm
+lib/Perlbal/AIO.pm
 lib/Perlbal/BackendHTTP.pm
 lib/Perlbal/ClientHTTP.pm
 lib/Perlbal/ClientHTTPBase.pm
@@ -12,8 +13,12 @@ lib/Perlbal/HTTPHeaders.pm
 lib/Perlbal/Service.pm
 lib/Perlbal/Socket.pm
 lib/Perlbal/TCPListener.pm
+lib/Perlbal/Util.pm
 lib/Perlbal/Test.pm
+lib/Perlbal/Test/WebServer.pm
+lib/Perlbal/Test/WebClient.pm
 lib/Perlbal/ManageCommand.pm
+lib/Perlbal/CommandContext.pm
 lib/Perlbal/Pool.pm
 lib/Perlbal/Plugin/Palimg.pm
 lib/Perlbal/Plugin/Queues.pm
@@ -33,14 +38,17 @@ conf/nodelist.dat
 conf/webserver.conf
 conf/load-balancer.conf
 conf/virtual-hosts.conf
+conf/ssl.conf
 t/00-use.t
 t/10-testharness.t
 t/12-headers.t
 t/15-webserver.t
 t/20-put.t
 t/30-reverseproxy.t
+t/31-realworld.t
 t/32-selector.t
 t/35-reproxy.t
 t/40-ranges.t
+t/45-buffereduploads.t
 t/50-plugins.t
 

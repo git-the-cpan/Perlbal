@@ -10,15 +10,12 @@
 # Copyright 2004, Danga Interactice, Inc.
 # Copyright 2005, Six Apart, Ltd.
 
-package main;
-
-# loading syscall.ph into package main in case some other module wants
-# to use it (like Danga::Socket, or whoever else)
-eval { require 'syscall.ph'; 1 } || eval { require 'sys/syscall.ph'; 1 };
-
 package Perlbal::ClientHTTPBase;
 use strict;
 use warnings;
+no  warnings qw(deprecated);
+
+use Sys::Syscall;
 use base "Perlbal::Socket";
 use HTTP::Date ();
 use fields ('service',             # Perlbal::Service object
@@ -41,8 +38,6 @@ use fields ('service',             # Perlbal::Service object
 
 use Errno qw( EPIPE ECONNRESET );
 use POSIX ();
-
-our $SYS_sendfile = &::SYS_sendfile;
 
 # ghetto hard-coding.  should let siteadmin define or something.
 # maybe console/config command:  AddMime <ext> <mime-type>  (apache-style?)
@@ -104,6 +99,7 @@ sub close {
 # information back to the client
 sub setup_keepalive {
     my Perlbal::ClientHTTPBase $self = $_[0];
+    print "ClientHTTPBase::setup_keepalive($self)\n" if Perlbal::DEBUG >= 2;
 
     # now get the headers we're using
     my Perlbal::HTTPHeaders $reshd = $_[1];
@@ -115,15 +111,22 @@ sub setup_keepalive {
     # if we came in via a selector service, that's whose settings
     # we respect for persist_client
     my $svc = $self->{selector_svc} || $self->{service};
+    my $persist_client = $svc->{persist_client} || 0;
+    print "  service's persist_client = $persist_client\n" if Perlbal::DEBUG >= 3;
 
     # do keep alive if they sent content-length or it's a head request
-    my $do_keepalive = $svc->{persist_client} &&
-                       $rqhd->req_keep_alive($reshd);
+    my $do_keepalive = $persist_client && $rqhd->req_keep_alive($reshd);
     if ($do_keepalive) {
+        print "  doing keep-alive to client\n" if Perlbal::DEBUG >= 3;
         my $timeout = $self->max_idle_time;
         $reshd->header('Connection', 'keep-alive');
         $reshd->header('Keep-Alive', $timeout ? "timeout=$timeout, max=100" : undef);
     } else {
+        print "  doing connection: close\n" if Perlbal::DEBUG >= 3;
+        # FIXME: we don't necessarily want to set connection to close,
+        # but really set a space-separated list of tokens which are
+        # specific to the connection.  "close" and "keep-alive" are
+        # just special.
         $reshd->header('Connection', 'close');
         $reshd->header('Keep-Alive', undef);
     }
@@ -138,13 +141,21 @@ sub http_response_sent {
     # close if we're supposed to
     if (
         ! defined $self->{res_headers} ||
-        ! $self->{res_headers}->res_keep_alive ||
+        ! $self->{res_headers}->res_keep_alive($self->{req_headers}) ||
         $self->{do_die}
         )
     {
         # close if we have no response headers or they say to close
         $self->close("no_keep_alive");
         return 0;
+    }
+
+    # if they just did a POST, set the flag that says we might expect
+    # an unadvertised \r\n coming from some browsers.  Old Netscape
+    # 4.x did this on all POSTs, and Firefox/Safari do it on
+    # XmlHttpRequest POSTs.
+    if ($self->{req_headers}->request_method eq "POST") {
+        $self->{ditch_leading_rn} = 1;
     }
 
     # now since we're doing persistence, uncork so the last packet goes.
@@ -179,8 +190,6 @@ sub http_response_sent {
     return 1;
 }
 
-use Carp qw(cluck);
-
 sub reproxy_fh {
     my Perlbal::ClientHTTPBase $self = shift;
 
@@ -211,6 +220,13 @@ sub event_read {
     my $hd = $self->read_request_headers;
     return unless $hd;
 
+    # we must stop watching for events now, otherwise if there's
+    # PUT/POST overflow, it'll be sent to ClientHTTPBase, which can't
+    # handle it yet.  must wait for the selector (which has as much
+    # time as it wants) to route as to our subclass, which can then
+    # renable reads.
+    $self->watch_read(0);
+
     # now that we have headers, it's time to tell the selector
     # plugin that it's time for it to select which real service to
     # use
@@ -218,6 +234,37 @@ sub event_read {
     return $self->_simple_response(500, "No service selector configured.")
         unless ref $selector eq "CODE";
     $selector->($self);
+}
+
+# client is ready for more of its file.  so sendfile some more to it.
+# (called by event_write when we're actually in this mode)
+sub event_write_reproxy_fh {
+    my Perlbal::ClientHTTPBase $self = shift;
+
+    my $to_send = $self->{reproxy_file_size} - $self->{reproxy_file_offset};
+    $self->tcp_cork(1) if $self->{reproxy_file_offset} == 0;
+
+    my $sent = Perlbal::Socket::sendfile($self->{fd},
+                                         fileno($self->{reproxy_fh}),
+                                         $to_send);
+    print "REPROXY Sent: $sent\n" if Perlbal::DEBUG >= 2;
+
+    if ($sent < 0) {
+        return $self->close("epipe")     if $! == EPIPE;
+        return $self->close("connreset") if $! == ECONNRESET;
+        print STDERR "Error w/ sendfile: $!\n";
+        $self->close('sendfile_error');
+        return;
+    }
+    $self->{reproxy_file_offset} += $sent;
+
+    if ($sent >= $to_send) {
+        # close the sendfile fd
+        CORE::close($self->{reproxy_fh});
+
+        $self->{reproxy_fh} = undef;
+        $self->http_response_sent;
+    }
 }
 
 sub event_write {
@@ -228,39 +275,17 @@ sub event_write {
     # subclasses can decide what's appropriate for timeout.
     $self->{alive_time} = time;
 
+    # if we're sending a filehandle, go do some more sendfile:
     if ($self->{reproxy_fh}) {
-        my $to_send = $self->{reproxy_file_size} - $self->{reproxy_file_offset};
-        $self->tcp_cork(1) if $self->{reproxy_file_offset} == 0;
-        my $sent = syscall($SYS_sendfile,
-                           $self->{fd},
-                           fileno($self->{reproxy_fh}),
-                           0, # NULL offset means kernel moves offset
-                           $to_send);
-        print "REPROXY Sent: $sent\n" if Perlbal::DEBUG >= 2;
-        if ($sent < 0) {
-            return $self->close("epipe") if $! == EPIPE;
-            return $self->close("connreset") if $! == ECONNRESET;
-            print STDERR "Error w/ sendfile: $!\n";
-            $self->close('sendfile_error');
-            return;
-        }
-        $self->{reproxy_file_offset} += $sent;
-
-        if ($sent >= $to_send) {
-            # close the sendfile fd
-            CORE::close($self->{reproxy_fh});
-
-            $self->{reproxy_fh} = undef;
-            $self->http_response_sent;
-        }
+        $self->event_write_reproxy_fh;
         return;
     }
 
+    # otherwise just kick-start our write buffer.
     if ($self->write(undef)) {
+        # we've written all data in the queue, so stop waiting for
+        # write notifications:
         print "All writing done to $self\n" if Perlbal::DEBUG >= 2;
-
-        # we've written all data in the queue, so stop waiting for write
-        # notifications:
         $self->watch_write(0);
     }
 }
@@ -275,7 +300,7 @@ sub _serve_request {
         return $self->_simple_response(403, "Unimplemented method");
     }
 
-    my $uri = _durl($self->{replacement_uri} || $hd->request_uri);
+    my $uri = Perlbal::Util::durl($self->{replacement_uri} || $hd->request_uri);
 
     # don't allow directory traversal
     if ($uri =~ /\.\./ || $uri !~ m!^/!) {
@@ -286,6 +311,9 @@ sub _serve_request {
 
     # start_serve_request hook
     return 1 if $self->{service}->run_hook('start_serve_request', $self, \$uri);
+
+    return $self->_simple_response(500, "Docroot unconfigured")
+        unless $svc->{docroot};
 
     my $file = $svc->{docroot} . $uri;
 
@@ -476,6 +504,28 @@ sub _simple_response {
     return 1;
 }
 
+
+sub send_response {
+    my Perlbal::ClientHTTPBase $self = shift;
+
+    $self->watch_read(0);
+    $self->watch_write(1);
+    return $self->_simple_response(@_);
+}
+
+# method that sends a 500 to the user but logs it and any extra information
+# we have about the error in question
+sub system_error {
+    my Perlbal::ClientHTTPBase $self = shift;
+    my ($msg, $info) = @_;
+
+    # log to syslog
+    Perlbal::log('warning', "system error: $msg ($info)");
+
+    # and return a 500
+    return $self->send_response(500, $msg);
+}
+
 # FIXME: let this be configurable?
 sub max_idle_time { 30; }
 
@@ -501,15 +551,7 @@ sub as_string {
     return $ret;
 }
 
-sub _durl {
-    my ($a) = @_;
-    $a =~ tr/+/ /;
-    $a =~ s/%([a-fA-F0-9][a-fA-F0-9])/pack("C", hex($1))/eg;
-    return $a;
-}
-
 1;
-
 
 # Local Variables:
 # mode: perl

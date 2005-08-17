@@ -6,9 +6,14 @@
 package Perlbal::Socket;
 use strict;
 use warnings;
+no  warnings qw(deprecated);
+
 use Perlbal::HTTPHeaders;
 
-use Danga::Socket '1.25';
+use Sys::Syscall;
+use POSIX ();
+
+use Danga::Socket '1.44';
 use base 'Danga::Socket';
 
 use fields (
@@ -22,9 +27,11 @@ use fields (
             'state',           # general purpose state; used by descendants.
             'do_die',          # if on, die and do no further requests
 
-            'read_buf',
-            'read_ahead',
-            'read_size',
+            'read_buf',        # arrayref of scalarref read from client
+            'read_ahead',      # bytes sitting in read_buf
+            'read_size',       # total bytes read from client, ever
+
+            'ditch_leading_rn', # if true, the next header parsing will ignore a leading \r\n
             );
 
 use constant MAX_HTTP_HEADER_LENGTH => 102400;  # 100k, arbitrary
@@ -56,6 +63,22 @@ sub get_created_objects_ref {
     return \@created_objects;
 }
 
+sub write_debuggy {
+    my $self = shift;
+
+    my $cref = $_[0];
+    my $content = ref $cref eq "SCALAR" ? $$cref : $cref;
+    my $clen = defined $content ? length($content) : "undef";
+    $content = substr($content, 0, 17) . "..." if defined $content && $clen > 30;
+    my ($pkg, $filename, $line) = caller;
+    print "write($self, <$clen>\"$content\") from ($pkg, $filename, $line)\n" if Perlbal::DEBUG >= 4;
+    $self->SUPER::write(@_);
+}
+
+if (Perlbal::DEBUG >= 4) {
+    *write = \&write_debuggy;
+}
+
 sub new {
     my Perlbal::Socket $self = shift;
     $self = fields::new( $self ) unless ref $self;
@@ -67,7 +90,7 @@ sub new {
     $self->{state} = undef;
     $self->{do_die} = 0;
 
-    $self->{read_buf} = [];        # scalar refs of bufs read from client
+    $self->{read_buf} = [];        # arrayref of scalar refs of bufs read from client
     $self->{read_ahead} = 0;       # bytes sitting in read_buf
     $self->{read_size} = 0;        # total bytes read from client
 
@@ -175,45 +198,75 @@ sub run_callbacks {
 # can override.
 sub max_idle_time { 0; }
 
-# Socket: specific to HTTP socket types
+# Socket: specific to HTTP socket types (only here and not in
+# ClientHTTPBase because ClientManage wants it too)
+sub read_request_headers  { read_headers($_[0], 0); }
+sub read_response_headers { read_headers($_[0], 1); }
 sub read_headers {
     my Perlbal::Socket $self = shift;
     my $is_res = shift;
-
-    $Perlbal::reqs++ unless $is_res;
+    print "Perlbal::Socket::read_headers($self) is_res=$is_res\n" if Perlbal::DEBUG >= 2;
 
     my $sock = $self->{sock};
 
     my $to_read = MAX_HTTP_HEADER_LENGTH - length($self->{headers_string});
 
     my $bref = $self->read($to_read);
-    return $self->close('remote_closure') if ! defined $bref;  # client disconnected
+    unless (defined $bref) {
+        # client disconnected
+        print "  client disconnected\n" if Perlbal::DEBUG >= 3;
+        return $self->close('remote_closure');
+    }
 
     $self->{headers_string} .= $$bref;
     my $idx = index($self->{headers_string}, "\r\n\r\n");
 
     # can't find the header delimiter?
     if ($idx == -1) {
+
+        # usually we get the headers all in one packet (one event), so
+        # if we get in here, that means it's more than likely the
+        # extra \r\n and if we clean it now (throw it away), then we
+        # can avoid a regexp later on.
+        if ($self->{ditch_leading_rn} && $self->{headers_string} eq "\r\n") {
+            print "  throwing away leading \\r\\n\n" if Perlbal::DEBUG >= 3;
+            $self->{ditch_leading_rn} = 0;
+            $self->{headers_string}   = "";
+            return 0;
+        }
+
+        print "  can't find end of headers\n" if Perlbal::DEBUG >= 3;
         $self->close('long_headers')
             if length($self->{headers_string}) >= MAX_HTTP_HEADER_LENGTH;
         return 0;
     }
 
     my $hstr = substr($self->{headers_string}, 0, $idx);
-    print "HEADERS: [$hstr]\n" if Perlbal::DEBUG >= 2;
+    print "  pre-parsed headers: [$hstr]\n" if Perlbal::DEBUG >= 3;
 
     my $extra = substr($self->{headers_string}, $idx+4);
     if (my $len = length($extra)) {
-        push @{$self->{read_buf}}, \$extra;
-        $self->{read_size} = $self->{read_ahead} = length($extra);
-        print "post-header extra: $len bytes\n" if Perlbal::DEBUG >= 2;
+        print "  pushing back $len bytes after header\n" if Perlbal::DEBUG >= 3;
+        $self->push_back_read(\$extra);
     }
+
+    # some browsers send an extra \r\n after their POST bodies that isn't
+    # in their content-length.  a base class can tell us when they're
+    # on their 2nd+ request after a POST and tell us to be ready for that
+    # condition, and we'll clean it up
+    $hstr =~ s/^\r\n// if $self->{ditch_leading_rn};
 
     unless (($is_res ? $self->{res_headers} : $self->{req_headers}) =
                 Perlbal::HTTPHeaders->new(\$hstr, $is_res)) {
         # bogus headers?  close connection.
+        print "  bogus headers\n" if Perlbal::DEBUG >= 3;
         return $self->close("parse_header_failure");
     }
+
+    print "  got valid headers\n" if Perlbal::DEBUG >= 3;
+
+    $Perlbal::reqs++ unless $is_res;
+    $self->{ditch_leading_rn} = 0;
 
     return $is_res ? $self->{res_headers} : $self->{req_headers};
 }
@@ -260,9 +313,6 @@ sub state {
     return $self->{state} = $_[0];
 }
 
-sub read_request_headers  { read_headers(@_, 0); }
-sub read_response_headers { read_headers(@_, 1); }
-
 sub as_string_html {
     my Perlbal::Socket $self = shift;
     return $self->SUPER::as_string;
@@ -272,6 +322,31 @@ sub DESTROY {
     my Perlbal::Socket $self = shift;
     delete $state_changes{"$self"} if Perlbal::TRACK_STATES;
     Perlbal::objdtor($self);
+}
+
+# package function (not a method).  returns bytes sent, or -1 on error.
+our $sf_defined = Sys::Syscall::sendfile_defined;
+our $max_sf_readwrite = 128 * 1024;
+sub sendfile {
+    my ($sfd, $fd, $bytes) = @_;
+    return Sys::Syscall::sendfile($sfd, $fd, $bytes) if $sf_defined;
+
+    # no support for sendfile.  ghetto version:  read and write.
+    my $buf;
+    $bytes = $max_sf_readwrite if $bytes > $max_sf_readwrite;
+
+    my $rv = POSIX::read($fd, $buf, $bytes);
+    return -1 unless defined $rv;
+    return -1 unless $rv == $bytes;
+
+    my $wv = POSIX::write($sfd, $buf, $rv);
+    return -1 unless defined $wv;
+
+    if (my $over_read = $rv - $wv) {
+        POSIX::lseek($fd, -$over_read, &POSIX::SEEK_CUR);
+    }
+
+    return $wv;
 }
 
 1;

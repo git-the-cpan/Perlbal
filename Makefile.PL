@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 #   Perl Makefile for Perlbal
-#   $Id: Makefile.PL,v 1.11 2005/07/26 05:41:59 bradfitz Exp $
+#   $Id: Makefile.PL,v 1.16 2005/08/17 05:51:26 bradfitz Exp $
 #
 #   Invoke with 'perl Makefile.PL'
 #
@@ -13,7 +13,7 @@ use ExtUtils::MakeMaker;
 
 WriteMakefile(
     NAME                    => 'Perlbal',
-    VERSION                 => '1.3',
+    VERSION                 => '1.35',
     AUTHOR                  => 'Brad Fitzpatrick <brad@danga.com>',
     ABSTRACT_FROM           => 'perlbal',
 
@@ -24,10 +24,12 @@ WriteMakefile(
     ),
 
     PREREQ_PM               => {
-        'Danga::Socket' => '1.43',
+        'Danga::Socket' => '1.44',
+        'Sys::Syscall'  => 0,
         'BSD::Resource' => 0,
-        'Test::More' => 0,
-        'File::Find' => 0,
+        'Test::More'    => 0,
+        'File::Find'    => 0,
+        'Time::HiRes'   => 0,
     },
     dist                    => {
         CI                      => "cvs commit",

@@ -9,6 +9,8 @@
 package Perlbal::ClientHTTP;
 use strict;
 use warnings;
+no  warnings qw(deprecated);
+
 use base "Perlbal::ClientHTTPBase";
 
 use fields ('put_in_progress', # 1 when we're currently waiting for an async job to return
@@ -37,12 +39,16 @@ sub new {
     return $self;
 }
 
+# upcasting a generic ClientHTTPBase (from a service selector) to a
+# "full-fledged" ClientHTTP.
 sub new_from_base {
     my $class = shift;
-    my Perlbal::ClientHTTPBase $cb = shift;
+    my Perlbal::ClientHTTPBase $cb = shift;    # base object
     bless $cb, $class;
     $cb->init;
-    $cb->handle_request;
+
+    $cb->watch_read(1);   # enable our reads, so we can get PUT/POST data
+    $cb->handle_request;  # this will disable reads, if GET/HEAD/etc
     return $cb;
 }
 
@@ -60,16 +66,7 @@ sub close {
     return if $self->{closed};
 
     $self->{put_fh} = undef;
-
     $self->SUPER::close(@_);
-}
-
-sub send_response {
-    my Perlbal::ClientHTTP $self = shift;
-
-    $self->watch_read(0);
-    $self->watch_write(1);
-    return $self->_simple_response(@_);
 }
 
 sub event_read {
@@ -78,26 +75,7 @@ sub event_read {
     # see if we have headers?
     if ($self->{req_headers}) {
         if ($self->{req_headers}->request_method eq 'PUT') {
-            # read in data and shove it on the read buffer
-            if (defined (my $dataref = $self->read($self->{content_length_remain}))) {
-                # got some data
-                $self->{read_buf} .= $$dataref;
-                my $clen = length($$dataref);
-                $self->{read_size} += $clen;
-                $self->{content_length_remain} -= $clen;
-
-                # handle put if we should
-                $self->handle_put if $self->{read_size} >= 8192; # arbitrary
-
-                # now, if we've filled the content of this put, we're done
-                unless ($self->{content_length_remain}) {
-                    $self->watch_read(0);
-                    $self->handle_put;
-                }
-            } else {
-                # undefined read, user closed on us
-                $self->close('remote_closure');
-            }
+            $self->event_read_put;
         } else {
             # since we have headers and we're not doing any special
             # handling above, let's just disable read notification, because
@@ -108,12 +86,13 @@ sub event_read {
     }
 
     # try and get the headers, if they're all here
-    my $hd = $self->read_request_headers;
-    return unless $hd;
+    my $hd = $self->read_request_headers
+        or return;
 
     $self->handle_request;
 }
 
+# one-time routing of new request to the right handlers
 sub handle_request {
     my Perlbal::ClientHTTP $self = shift;
     my $hd = $self->{req_headers};
@@ -125,54 +104,96 @@ sub handle_request {
     return if $self->{service}->run_hook('start_web_request',  $self);
     return if $self->{service}->run_hook('start_http_request', $self);
 
-    # see what method it is?
+    # GET/HEAD requests (local, from disk)
     if ($hd->request_method eq 'GET' || $hd->request_method eq 'HEAD') {
         # and once we have it, start serving
         $self->watch_read(0);
         return $self->_serve_request($hd);
-    } elsif ($self->{service}->{enable_put} && $hd->request_method eq 'PUT') {
-        # they want to put something, so let's setup and wait for more reads
-        my $clen = $hd->header('Content-length') + 0;
-
-        # return a 400 (bad request) if we got no content length or if it's
-        # bigger than any specified max put size
-        return $self->send_response(400, "Content-length of $clen is invalid.")
-            if !$clen ||
-               ($self->{service}->{max_put_size} &&
-                $clen > $self->{service}->{max_put_size});
-
-        # if we have some data already from a header over-read, handle it by
-        # flattening it down to a single string as opposed to an array of stuff
-        if (defined $self->{read_size} && $self->{read_size} > 0) {
-            my $data = '';
-            foreach my $rdata (@{$self->{read_buf}}) {
-                $data .= ref $rdata ? $$rdata : $rdata;
-            }
-            $self->{read_buf} = $data;
-            $self->{content_length} = $clen;
-            $self->{content_length_remain} = $clen - $self->{read_size};
-        } else {
-            # setup to read the file
-            $self->{read_buf} = '';
-            $self->{content_length} = $self->{content_length_remain} = $clen;
-        }
-
-        # setup the directory asynchronously
-        $self->setup_put;
-        return;
-    } elsif ($self->{service}->{enable_delete} && $hd->request_method eq 'DELETE') {
-        # delete a file
-        $self->watch_read(0);
-        return $self->setup_delete;
     }
+
+    # PUT requests
+    return $self->handle_put    if $hd->request_method eq 'PUT';
+
+    # DELETE requests
+    return $self->handle_delete if $hd->request_method eq 'DELETE';
 
     # else, bad request
     return $self->send_response(400);
 }
 
-# called when we're requested to do a delete
-sub setup_delete {
+sub handle_put {
     my Perlbal::ClientHTTP $self = shift;
+    my $hd = $self->{req_headers};
+
+    return $self->send_response(403) unless $self->{service}->{enable_put};
+
+    # they want to put something, so let's setup and wait for more reads
+    my $clen =
+        $self->{content_length} =
+        $self->{content_length_remain} =
+        $hd->header('Content-length') + 0;
+
+    # return a 400 (bad request) if we got no content length or if it's
+    # bigger than any specified max put size
+    return $self->send_response(400, "Content-length of $clen is invalid.")
+        if !$clen ||
+        ($self->{service}->{max_put_size} &&
+         $clen > $self->{service}->{max_put_size});
+
+    # if we have some data already from a header over-read, note it
+    if (defined $self->{read_ahead} && $self->{read_ahead} > 0) {
+        $self->{content_length_remain} -= $self->{read_ahead};
+    }
+
+    return if $self->{service}->run_hook('handle_put', $self);
+
+    # error in filename?  (any .. is an error)
+    my $uri = $self->{req_headers}->request_uri;
+    return $self->send_response(400, 'Invalid filename')
+        if $uri =~ /\.\./;
+
+    # now we want to get the URI
+    return $self->send_response(400, 'Invalid filename')
+        unless $uri =~ m!^
+            ((?:/[\w\-\.]+)*)      # $1: zero+ path components of /FOO where foo is
+                                     #   one+ conservative characters
+                  /                  # path separator
+            ([\w\-\.]+)            # $2: and the filename, one+ conservative characters
+            $!x;
+
+    # sanitize uri into path and file into a disk path and filename
+    my ($path, $filename) = ($1 || '', $2);
+
+    # the final action we'll be taking, eventually, is to start an async
+    # file open of the requested disk path.  but we might need to verify
+    # the min_put_directory first.
+    my $start_open = sub {
+        my $disk_path = $self->{service}->{docroot} . '/' . $path;
+        $self->start_put_open($disk_path, $filename);
+    };
+
+    # verify minput if necessary
+    if ($self->{service}->{min_put_directory}) {
+        my @elems = grep { defined $_ && length $_ } split '/', $path;
+        return $self->send_response(400, 'Does not meet minimum directory requirement')
+            unless scalar(@elems) >= $self->{service}->{min_put_directory};
+        my $req_path   = '/' . join('/', splice(@elems, 0, $self->{service}->{min_put_directory}));
+        my $extra_path = '/' . join('/', @elems);
+        $self->validate_min_put_directory($req_path, $extra_path, $filename, $start_open);
+    } else {
+        $start_open->();
+    }
+
+    return;
+}
+
+# called when we're requested to do a delete
+sub handle_delete {
+    my Perlbal::ClientHTTP $self = shift;
+
+    return $self->send_response(403) unless $self->{service}->{enable_delete};
+
+    $self->watch_read(0);
 
     # error in filename?  (any .. is an error)
     my $uri = $self->{req_headers}->request_uri;
@@ -201,54 +222,46 @@ sub setup_delete {
     }
 }
 
-# called when we've got headers and are about to start a put
-sub setup_put {
+sub event_read_put {
     my Perlbal::ClientHTTP $self = shift;
 
-    return if $self->{service}->run_hook('setup_put', $self);
-    return if $self->{put_fh};
+    # read in data and shove it on the read buffer
+    my $dataref = $self->read($self->{content_length_remain});
 
-    # error in filename?  (any .. is an error)
-    my $uri = $self->{req_headers}->request_uri;
-    return $self->send_response(400, 'Invalid filename')
-        if $uri =~ /\.\./;
+    # unless they disconnected prematurely
+    unless (defined $dataref) {
+        $self->close('remote_closure');
+        return;
+    }
 
-    # now we want to get the URI
-    if ($uri =~ m!^((?:/[\w\-\.]+)*)/([\w\-\.]+)$!) {
-        # sanitize uri into path and file into a disk path and filename
-        my ($path, $filename) = ($1 || '', $2);
+    # got some data
+    push @{$self->{read_buf}}, $dataref;
+    my $clen = length($$dataref);
+    $self->{read_size}  += $clen;
+    $self->{read_ahead} += $clen;
+    $self->{content_length_remain} -= $clen;
 
-        # verify minput if necessary
-        if ($self->{service}->{min_put_directory}) {
-            my @elems = grep { defined $_ && length $_ } split '/', $path;
-            return $self->send_response(400, 'Does not meet minimum directory requirement')
-                unless scalar(@elems) >= $self->{service}->{min_put_directory};
-            my $minput = '/' . join('/', splice(@elems, 0, $self->{service}->{min_put_directory}));
-            my $path = '/' . join('/', @elems);
-            return unless $self->verify_put($minput, $path, $filename);
-        }
-
-        # now we want to open this directory
-        my $lpath = $self->{service}->{docroot} . '/' . $path;
-        return $self->attempt_open($lpath, $filename);
+    if ($self->{content_length_remain}) {
+        $self->put_writeout if $self->{read_ahead} >= 8192; # arbitrary
     } else {
-        # bad URI, don't accept the put
-        return $self->send_response(400, 'Invalid filename');
+        # now, if we've filled the content of this put, we're done
+        $self->watch_read(0);
+        $self->put_writeout;
     }
 }
 
-# verify that a minimum put directory exists
-# return value: 1 means the directory is okay, continue
-#               0 means we must verify the directory, stop processing
-sub verify_put {
+# verify that a minimum put directory exists.  if/when it's verified,
+# perhaps cached, the provided callback will be run.
+sub validate_min_put_directory {
     my Perlbal::ClientHTTP $self = shift;
-    my ($minput, $extrapath, $filename) = @_;
+    my ($req_path, $extra_path, $filename, $callback) = @_;
 
-    my $mindir = $self->{service}->{docroot} . '/' . $minput;
-    return 1 if $VerifiedDirs{$mindir};
+    my $disk_dir = $self->{service}->{docroot} . '/' . $req_path;
+    return $callback->() if $VerifiedDirs{$disk_dir};
+
     $self->{put_in_progress} = 1;
 
-    Perlbal::AIO::aio_open($mindir, O_RDONLY, 0755, sub {
+    Perlbal::AIO::aio_open($disk_dir, O_RDONLY, 0755, sub {
         my $fh = shift;
         $self->{put_in_progress} = 0;
 
@@ -257,14 +270,13 @@ sub verify_put {
         CORE::close($fh);
 
         # mindir existed, mark it as so and start the open for the rest of the path
-        $VerifiedDirs{$mindir} = 1;
-        return $self->attempt_open($mindir . $extrapath, $filename);
+        $VerifiedDirs{$disk_dir} = 1;
+        $callback->();
     });
-    return 0;
 }
 
-# attempt to open a file
-sub attempt_open {
+# attempt to open a file being PUT for writing to disk
+sub start_put_open {
     my Perlbal::ClientHTTP $self = shift;
     my ($path, $file) = @_;
 
@@ -284,7 +296,7 @@ sub attempt_open {
                 return $self->system_error("Unable to create directory", "path = $path, file = $file") if $@;
 
                 # should be created, call self recursively to try
-                return $self->attempt_open($path, $file);
+                return $self->start_put_open($path, $file);
             } else {
                 return $self->system_error("Internal error", "error = $!, path = $path, file = $file");
             }
@@ -292,35 +304,26 @@ sub attempt_open {
 
         $self->{put_fh} = $fh;
         $self->{put_pos} = 0;
-        $self->handle_put;
+        $self->put_writeout;
     });
 }
 
-# method that sends a 500 to the user but logs it and any extra information
-# we have about the error in question
-sub system_error {
-    my Perlbal::ClientHTTP $self = shift;
-    my ($msg, $info) = @_;
-
-    # log to syslog
-    Perlbal::log('warning', "system error: $msg ($info)");
-
-    # and return a 500
-    return $self->send_response(500, $msg);
-}
-
 # called when we've got some put data to write out
-sub handle_put {
+sub put_writeout {
     my Perlbal::ClientHTTP $self = shift;
+    Carp::confess("wrong class for $self") unless ref $self eq "Perlbal::ClientHTTP";
 
-    return if $self->{service}->run_hook('handle_put', $self);
+    return if $self->{service}->run_hook('put_writeout', $self);
     return if $self->{put_in_progress};
     return unless $self->{put_fh};
-    return unless $self->{read_size};
+    return unless $self->{read_ahead};
 
-    # dig out data to write
-    my ($data, $count) = ($self->{read_buf}, $self->{read_size});
-    ($self->{read_buf}, $self->{read_size}) = ('', 0);
+    my $data = join("", map { $$_ } @{$self->{read_buf}});
+    my $count = length $data;
+
+    # reset our input buffer
+    $self->{read_buf}   = [];
+    $self->{read_ahead} = 0;
 
     # okay, file is open, write some data
     $self->{put_in_progress} = 1;
@@ -335,20 +338,20 @@ sub handle_put {
         $self->{put_in_progress} = 0;
 
         # now recursively call ourselves?
-        if ($self->{read_size}) {
-            $self->handle_put;
+        if ($self->{read_ahead}) {
+            $self->put_writeout;
+            return;
+        }
+
+        return if $self->{content_length_remain};
+
+        # we're done putting this file, so close it.
+        # FIXME this should be done through AIO
+        if ($self->{put_fh} && CORE::close($self->{put_fh})) {
+            $self->{put_fh} = undef;
+            return $self->send_response(200);
         } else {
-            # we done putting this file?
-            unless ($self->{content_length_remain}) {
-                # close it
-                # FIXME this should be done through AIO
-                if ($self->{put_fh} && CORE::close($self->{put_fh})) {
-                    $self->{put_fh} = undef;
-                    return $self->send_response(200);
-                } else {
-                    return $self->system_error("Error saving file", "error in close: $!");
-                }
-            }
+            return $self->system_error("Error saving file", "error in close: $!");
         }
     });
 }
