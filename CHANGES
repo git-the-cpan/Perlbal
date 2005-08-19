@@ -1,3 +1,14 @@
+1.36 (beta for 1.40) 2005-08-19
+
+    -- fix bug in ClientProxy when user disconnects after POST/PUTing
+       a content body, but before a response comes back.
+
+    -- now checks correctly for Danga::Socket version 1.44 or above.
+       (required version was in quotes, confusing perl.)
+
+    -- vhost plugin: strip off port specification from the Host header
+       before trying to match with configured patterns.
+
 1.35: (beta of 1.40) 2005-08-16
 
     -- beta SSL support in a few lines of code.  maybe it's completely
