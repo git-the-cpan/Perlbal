@@ -58,6 +58,7 @@ use Perlbal::HTTPHeaders;
 use Perlbal::Service;
 use Perlbal::Socket;
 use Perlbal::TCPListener;
+use Perlbal::UploadListener;
 use Perlbal::ClientManage;
 use Perlbal::ClientHTTPBase;
 use Perlbal::ClientProxy;
@@ -811,6 +812,16 @@ sub MANAGE_create {
         $mc->{ctx}{last_created} = $name;
         return $mc->ok;
     }
+}
+
+sub MANAGE_use {
+    my $mc = shift->parse(qr/^use (\w+)$/,
+                          "usage: USE <service_or_pool_name>");
+    my ($name) = $mc->args;
+    return $mc->err("Non-existent pool or service '$name'") unless $pool{$name} || $service{$name};
+
+    $mc->{ctx}{last_created} = $name;
+    return $mc->ok;
 }
 
 sub MANAGE_pool {

@@ -1,3 +1,73 @@
+1.38: (beta for 1.40) 2005-10-19
+
+    -- some paranoia evals around some parts of buffered uploads that
+       SAPO reported crashes in occasionally.  added FIXMEs to investigate
+       too.  for now, though, evals around closing files is safer.
+
+    -- new feature: inter-perlbal upload tracking.  for fancy upload
+       bars driven by XmlHttpRequest when clients are upload large files
+
+    -- WARNING: reproxying (files or URLs) is now disabled by default,
+       and must be enabled per-service with "enable_reproxy = true"
+
+    -- do a final little read before closing an HTTP connection
+       to make sure we have no unread data in kernel (notably
+       an extra "\r\n" from an IE post), so when we do close, we
+       don't send a RST packet to the end user.  Thanks to Kevin
+       Lewandowski from discogs.com for the bug report.
+
+    -- use Danga::Socket's AddTimer interface to disconnect
+       stale persistent connections every 5 seconds, driven by
+       a timer, rather than every 15 seconds, driven by
+       socket creation.
+
+    -- there was a bug where 304 Not Modified responses would
+       cause a connection close (and thus RST packets) even
+       though keep-alive was negotiated and would've worked
+
+    -- ignore URL arguments when doing directory indexing
+
+    -- work a little better under "trickle".  (but still not perfect...
+       trickle doesn't quite work on Perlbal, unfortunately. it's useful,
+       or would've been useful, for testing some parts...)
+
+    -- avoid an occasional warning with dirindexing on unreadable directories
+
+1.37 (beta for 1.40) 2005-08-29
+
+    -- "use <name>" command to set the direct object for future commands
+
+    -- AccessControl plugin to allow/deny by default or on IPs or
+       netmasks.
+
+    -- ClientManage could spin in its inherited event_write, causing
+       99.9% cpu usage.  Bug is arguably Danga::Socket's, but also
+       ours because it's documented what we should do and we didn't.
+       The fix is to shut down watching writability when we're done
+       writing.
+
+    -- make accept_client and its callers deal with the possibility
+       that accept_client fails not because the backend is bogus, but
+       because the client is.  so now accept_client can close the
+       client and callers have to be aware of that.
+
+    -- after running this version on production on LiveJournal.com for
+       a bit, we discovered some cases that we'd flag as should never happen,
+       but actually do, so updated the comments and behavior to
+       do the right thing and not just crash with an assertion.
+
+    -- fix misspellings of trusted_upstream_proxies that didn't
+       come along for the renaming ride earlier
+
+    -- webserver mode now ignores URL arguments when looking up
+       filename
+
+    -- remove warnings accessing undefs in ranges and vhosts
+
+    -- new --version and --help flags.  also a usage message on bogus
+       options (or when --help).  props to Jacques Marneweck
+       <jacques@powertrip.co.za> for the help and motivation.
+
 1.36 (beta for 1.40) 2005-08-19
 
     -- fix bug in ClientProxy when user disconnects after POST/PUTing

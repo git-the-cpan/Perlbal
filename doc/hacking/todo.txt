@@ -48,17 +48,47 @@
 
 * more global & per node/service/pool bytes in/out
 
-* security for those unaware: make reproxy-file and reproxy-url
-  optional things you must explicitly enable on a service
-
 * make the response-code-tracking-per-ipport a plugin, not on by default:
     my $ref = ($NodeStats{$self->{ipport}}->{responsecodes} ||= []);
     ....
 
 * pidfile writing
 
-* --version / --help
-
 * acl stuff
 
 * CREATE SERVICE foo LIKE webserver
+
+* HTTP::Request (and other LWP/etc stuff) is required for make test
+  but not the rest of the app.  fix that one way or another.
+
+* ProxyPassReverse-like system
+
+* "getter" commands to retrieve the running config (GET?) or DUMP/SHOW/LIST?
+  dumping just one property, vs whole service, vs whole server?
+
+* add tests for "trusted_upstream_proxies" and "always_trusted"
+  (rename to always_trust_upstream?)
+
+* get rid of httpres vs. res distinction in HTTPHeaders
+
+* verify that we support all the HTTP methods that subversion needs:
+  (what the content body/length assumptions there are, if any special)
+
+    GET, PROPFIND, REPORT, OPTIONS, MERGE, MKACTIVITY, CHECKOUT
+
+    HTTP/1.1: GET, HEAD, POST, PUT, DELETE, OPTIONS, TRACE, CONNECT
+    WebDAV: LOCK, UNLOCK, PROPFIND, PROPPATCH, COPY, MOVE, MKCOL
+    DeltaV: CHECKIN, CHECKOUT, UNCHECKOUT, VERSION-CONTROL, REPORT,
+            UPDATE, LABEL, MERGE, MKWORKSPACE, BASELINE-CONTROL, MKACTIVITY
+
+  Subversion uses no methods outside these. It doesn't use all of them
+  either, but it's better to support the full WebDAV/DeltaV than just
+  some arbitrary subset. If the proxy being configured is a recent
+  Squid, it probably has everything from HTTP/1.1 and WebDAV - and then
+  it only needs the DeltaV extensions added.
+
+* secure downloads, ala: http://www.lighttpd.net/documentation/secdownload.html
+
+* fix up req_keep_alive and res_keep_alive --- too much duplicated code
+  and too many calls.  doesn't feel right.
+

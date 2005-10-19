@@ -145,6 +145,10 @@ sub http_response_sent {
         $self->{do_die}
         )
     {
+        # do a final read so we don't have unread_data_waiting and RST
+        # the connection.  IE and others send an extra \r\n after POSTs
+        my $dummy = $self->read(5);
+
         # close if we have no response headers or they say to close
         $self->close("no_keep_alive");
         return 0;
@@ -219,6 +223,8 @@ sub event_read {
 
     my $hd = $self->read_request_headers;
     return unless $hd;
+
+    return if $self->{service}->run_hook('start_http_request', $self);
 
     # we must stop watching for events now, otherwise if there's
     # PUT/POST overflow, it'll be sent to ClientHTTPBase, which can't
@@ -301,6 +307,9 @@ sub _serve_request {
     }
 
     my $uri = Perlbal::Util::durl($self->{replacement_uri} || $hd->request_uri);
+
+    # chop off the query string
+    $uri =~ s/\?.*//;
 
     # don't allow directory traversal
     if ($uri =~ /\.\./ || $uri !~ m!^/!) {
@@ -415,61 +424,61 @@ sub _serve_request {
             });
 
         } elsif (-d _) {
-            $self->try_index_files($hd, $res);
+            $self->try_index_files($hd, $res, $uri);
         }
     });
 }
 
 sub try_index_files {
     my Perlbal::ClientHTTPBase $self = shift;
-    my ($hd, $res, $filepos) = @_;
+    my ($hd, $res, $uri, $filepos) = @_;
 
     # make sure this starts at 0 initially, and fail if it's past the end
     $filepos ||= 0;
     if ($filepos >= scalar(@{$self->{service}->{index_files} || []})) {
-        if ($self->{service}->{dirindexing}) {
-            # open the directory and create an index
-            my $body;
-            my $file = $self->{service}->{docroot} . '/' . $hd->request_uri;
-
-            $res->header("Content-Type", "text/html");
-            opendir(D, $file);
-            foreach my $de (sort readdir(D)) {
-                if (-d "$file/$de") {
-                    $body .= "<b><a href='$de/'>$de</a></b><br />\n";
-                } else {
-                    $body .= "<a href='$de'>$de</a><br />\n";
-                }
-            }
-            closedir(D);
-
-            $res->header("Content-Length", length($body));
-            $self->setup_keepalive($res);
-
-            $self->state('xfer_resp');
-            $self->tcp_cork(1);  # cork writes to self
-            $self->write($res->to_string_ref);
-            $self->write(\$body);
-            $self->write(sub { $self->http_response_sent; });
-        } else {
+        unless ($self->{service}->{dirindexing}) {
             # just inform them that listing is disabled
-            $self->_simple_response(200, "Directory listing disabled")
+            $self->_simple_response(200, "Directory listing disabled");
+            return;
         }
 
+        # open the directory and create an index
+        my $body = "";
+        my $file = $self->{service}->{docroot} . $uri;
+
+        $res->header("Content-Type", "text/html");
+        opendir(D, $file);
+        foreach my $de (sort readdir(D)) {
+            if (-d "$file/$de") {
+                $body .= "<b><a href='$de/'>$de</a></b><br />\n";
+            } else {
+                $body .= "<a href='$de'>$de</a><br />\n";
+            }
+        }
+        closedir(D);
+
+        $res->header("Content-Length", length($body));
+        $self->setup_keepalive($res);
+
+        $self->state('xfer_resp');
+        $self->tcp_cork(1);  # cork writes to self
+        $self->write($res->to_string_ref);
+        $self->write(\$body);
+        $self->write(sub { $self->http_response_sent; });
         return;
     }
 
     # construct the file path we need to check
     my $file = $self->{service}->{index_files}->[$filepos];
-    my $fullpath = $self->{service}->{docroot} . '/' . $hd->request_uri . '/' . $file;
+    my $fullpath = $self->{service}->{docroot} . $uri . '/' . $file;
 
     # now see if it exists
     Perlbal::AIO::aio_stat($fullpath, sub {
         return if $self->{closed};
-        return $self->try_index_files($hd, $res, $filepos + 1) unless -f _;
+        return $self->try_index_files($hd, $res, $uri, $filepos + 1) unless -f _;
 
         # at this point the file exists, so we just want to serve it
-        $self->{replacement_uri} = $hd->request_uri . '/' . $file;
+        $self->{replacement_uri} = $uri . '/' . $file;
         return $self->_serve_request($hd);
     });
 }

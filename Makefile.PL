@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 #   Perl Makefile for Perlbal
-#   $Id: Makefile.PL,v 1.16 2005/08/17 05:51:26 bradfitz Exp $
+#   $Id: Makefile.PL,v 1.17 2005/08/19 19:42:27 bradfitz Exp $
 #
 #   Invoke with 'perl Makefile.PL'
 #
@@ -13,7 +13,7 @@ use ExtUtils::MakeMaker;
 
 WriteMakefile(
     NAME                    => 'Perlbal',
-    VERSION                 => '1.36',
+    VERSION_FROM            => 'perlbal',
     AUTHOR                  => 'Brad Fitzpatrick <brad@danga.com>',
     ABSTRACT_FROM           => 'perlbal',
 

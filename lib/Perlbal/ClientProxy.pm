@@ -34,6 +34,10 @@ use fields (
             'buoutpos',            # int; buffered output position
             'backend_stalled',   # boolean:  if backend has shut off its reads because we're too slow.
             'unread_data_waiting',  # boolean:  if we shut off reads while we know data is yet to be read from client
+
+            # for perlbal sending out UDP packets related to upload status (for xmlhttprequest upload bar)
+            'last_upload_packet',  # unixtime we last sent a UDP upload packet
+            'upload_session',      # client's self-generated upload session
             );
 
 use constant READ_SIZE         => 131072;    # 128k, ~common TCP window size?
@@ -41,6 +45,8 @@ use constant READ_AHEAD_SIZE   =>  32768;    # kinda arbitrary.  sum of these tw
 use Errno qw( EPIPE ENOENT ECONNRESET EAGAIN );
 use POSIX qw( O_CREAT O_TRUNC O_RDWR O_RDONLY );
 use Time::HiRes qw( gettimeofday tv_interval );
+
+my $udp_sock;
 
 # ClientProxy
 sub new {
@@ -394,9 +400,10 @@ sub backend_finished {
     # if we don't have any data yet to read
     return $self->http_response_sent unless $self->{unread_data_waiting};
 
-    # FIXME: else what happens?  we slurp it up in event_read?  guess we'll
-    # die for now to be safe and see if this ever happens in practice.
-    Carp::confess("Backend finished and we have unread data waiting.");
+    # if we get here (and we do, rarely, in practice) then that means
+    # the backend read was empty/disconected (or otherwise messed up),
+    # and the only thing we can really do is close the client down.
+    $self->close("backend_finished_while_unread_data");
 }
 
 # called when we've sent a response to a user fully and we need to reset state
@@ -425,6 +432,7 @@ sub http_response_sent {
     $self->{bufilename} = undef;
     $self->{buoutpos} = 0;
     $self->{bureason} = undef;
+    $self->{upload_session} = undef;
     return 1;
 }
 
@@ -541,8 +549,11 @@ sub event_read {
     # if we got data that we weren't expecting, something's bogus with
     # our state machine (internal error)
     if (defined $remain && ! $remain) {
-        my $blen = $bref ? length($$bref) : "<undef>";
-        Carp::confess("INTERNAL ERROR: event_read called when we're expecting no more bytes.  len=$blen\n");
+        my $blen = length($$bref);
+        my $content = substr($$bref, 0, 80 < $blen ? 80 : $blen);
+        Carp::cluck("INTERNAL ERROR: event_read called on when we're expecting no more bytes.  len=$blen, content=[$content]\n");
+        $self->close;
+        return;
     }
 
     # now that we know we have a defined value, determine how long it is, and do
@@ -550,12 +561,36 @@ sub event_read {
     my $len = length($$bref);
     print "  read $len bytes\n" if Perlbal::DEBUG >= 3;
 
+    # when run under the program "trickle", epoll speaks the truth to
+    # us, but then trickle interferes and steals our reads/writes, so
+    # this fails.  normally this check isn't needed.
+    return unless $len;
+
     $self->{read_size} += $len;
     $self->{content_length_remain} -= $len if $remain;
 
     my $done_reading = defined $self->{content_length_remain} && $self->{content_length_remain} <= 0;
     my $backend = $self->backend;
     print("  done_reading = $done_reading, backend = ", ($backend || "<undef>"), "\n") if Perlbal::DEBUG >= 3;
+
+    # upload tracking
+    if (my $session = $self->{upload_session}) {
+        my $cl = $self->{req_headers}->content_length;
+        my $remain = $self->{content_length_remain};
+        my $now = time();  # FIXME: more efficient?
+        if ($cl && $remain && ($self->{last_upload_packet} || 0) != $now) {
+            my $done = $cl - $remain;
+            $self->{last_upload_packet} = $now;
+            $udp_sock ||= IO::Socket::INET->new(Proto => 'udp');
+            my $since = $self->{last_request_time};
+            my $send = "UPLOAD:$session:$done:$cl:$since:$now";
+            if ($udp_sock) {
+                foreach my $ep (@{ $self->{service}{upload_status_listeners_sockaddr} }) {
+                    my $rv = $udp_sock->send($send, 0, $ep);
+                }
+            }
+        }
+    }
 
     # just dump the read into the nether if we're dangling. that is
     # the case when we send the headers to the backend and it responds
@@ -626,15 +661,20 @@ sub handle_request {
     my Perlbal::ClientProxy $self = shift;
     my $req_hd = $self->{req_headers};
 
+    my $svc = $self->{service};
     # give plugins a chance to force us to bail
-    return if $self->{service}->run_hook('start_proxy_request', $self);
-    return if $self->{service}->run_hook('start_http_request',  $self);
+    return if $svc->run_hook('start_proxy_request', $self);
+    return if $svc->run_hook('start_http_request',  $self);
 
     # if defined we're waiting on some amount of data.  also, we have to
     # subtract out read_size, which is the amount of data that was
     # extra in the packet with the header that's part of the body.
     $self->{content_length_remain} = $req_hd->content_length;
     $self->{unread_data_waiting} = 1 if $self->{content_length_remain};
+
+    # upload-tracking stuff.  both starting a new upload track session,
+    # and checking on status of ongoing one
+    return if $svc->{upload_status_listeners} && $self->handle_upload_tracking;
 
     # note that we've gotten a request
     $self->{requests}++;
@@ -650,6 +690,41 @@ sub handle_request {
         $self->{is_buffering} = 0;
         $self->request_backend;
     }
+}
+
+# return 1 to steal this connection (when they're asking status of an
+# upload session), return 0 to return it to handle_request's control.
+sub handle_upload_tracking {
+    my Perlbal::ClientProxy $self = shift;
+    my $req_hd = $self->{req_headers};
+
+    return 0 unless
+        $req_hd->request_uri =~ /[\?&]client_up_sess=(\w{5,50})\b/;
+
+    my $sess = $1;
+
+    # getting status?
+    if ($req_hd->request_uri =~ m!^/__upload_status\?!) {
+        my $status = Perlbal::UploadListener::get_status($sess);
+        my $now = time();
+        my $body = $status ?
+            "{done:$status->{done},total:$status->{total},starttime:$status->{starttime},nowtime:$now}" :
+            "{}";
+
+        my $res = $self->{res_headers} = Perlbal::HTTPHeaders->new_response(200);
+        $res->header("Content-Type", "text/plain");
+        $res->header('Content-Length', length $body);
+        $self->setup_keepalive($res);
+        $self->tcp_cork(1);  # cork writes to self
+        $self->write($res->to_string_ref);
+        $self->write(\ $body);
+        $self->write(sub { $self->http_response_sent; });
+        return 1;
+    }
+
+    # otherwise just tagging this upload as a new upload session
+    $self->{upload_session} = $sess;
+    return 0;
 }
 
 # continuation of handle_request, in the case where we need to start buffering
@@ -824,7 +899,7 @@ sub buffered_upload_update {
 
         # check for error
         unless ($bytes) {
-            Perlbal::log('critical', "Error writing buffered upload: $!");
+            Perlbal::log('critical', "Error writing buffered upload: $!.  Tried to do $len bytes at $self->{buoutpos}.");
             return $self->_simple_response(500);
         }
 
@@ -855,18 +930,29 @@ sub buffered_upload_update {
 sub purge_buffered_upload {
     my Perlbal::ClientProxy $self = shift;
 
+    # FIXME: it's reported that sometimes the two now-in-eval blocks
+    # fail, hence the eval blocks and warnings.  the FIXME is to
+    # figure this out, why it happens sometimes.
+
     # first close our filehandle... not async
-    CORE::close($self->{bufh});
+    eval {
+        CORE::close($self->{bufh});
+    };
+    if ($@) { warn "Error closing file in ClientProxy::purge_buffered_upload: $@\n"; }
+
     $self->{bufh} = undef;
 
-    # now asyncronously unlink the file
-    Perlbal::AIO::aio_unlink($self->{bufilename}, sub {
-        if ($!) {
-            # note an error, but whatever, we'll either overwrite the file later (O_TRUNC | O_CREAT)
-            # or a cleaner will come through and do it for us someday (if the user runs one)
-            Perlbal::log('warning', "Unable to link $self->{bufilename}: $!");
-        }
-    });
+    eval {
+        # now asyncronously unlink the file
+        Perlbal::AIO::aio_unlink($self->{bufilename}, sub {
+            if ($!) {
+                # note an error, but whatever, we'll either overwrite the file later (O_TRUNC | O_CREAT)
+                # or a cleaner will come through and do it for us someday (if the user runs one)
+                Perlbal::log('warning', "Unable to link $self->{bufilename}: $!");
+              }
+        });
+    };
+    if ($@) { warn "Error unlinking file in ClientProxy::purge_buffered_upload: $@\n"; }
 }
 
 

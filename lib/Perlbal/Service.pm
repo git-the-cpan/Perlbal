@@ -44,8 +44,9 @@ use fields (
                                  # connections to activate pressure relief at
             'queue_relief_chance', # int:0-100; % chance to take a standard priority
                                    # request when we're in pressure relief mode
-            'trusted_upstreams', # Net::Netmask object containing netmasks for trusted upstreams
+            'trusted_upstream_proxies', # Net::Netmask object containing netmasks for trusted upstreams
             'always_trusted', # bool; if true, always trust upstreams
+            'enable_reproxy', # bool; if true, advertise that server will reproxy files and/or URLs
 
             # Internal state:
             'waiting_clients',         # arrayref of clients waiting for backendhttp conns
@@ -73,6 +74,9 @@ use fields (
             'buffer_upload_threshold_size', # int; buffer uploads greater than this size (in bytes)
             'buffer_upload_threshold_rate', # int; buffer uploads uploading at less than this rate (in bytes/sec)
 
+            'upload_status_listeners',  # string: comma separated list of ip:port of UDP upload status receivers
+            'upload_status_listeners_sockaddr',  # arrayref of sockaddrs (packed ip/port)
+
             'enable_ssl',         # bool: whether this service speaks SSL to the client
             'ssl_key_file',       # file:  path to key pem file
             'ssl_cert_file',      # file:  path to key pem file
@@ -86,7 +90,7 @@ our $tunables = {
         des => "What type of service.  One of 'reverse_proxy' for a service that load balances to a pool of backend webserver nodes, 'web_server' for a typical webserver', 'management' for a Perlbal management interface (speaks both command-line or HTTP, auto-detected), or 'selector', for a virtual service that maps onto other services.",
         required => 1,
 
-        check_type => ["enum", ["reverse_proxy", "web_server", "management", "selector"]],
+        check_type => ["enum", ["reverse_proxy", "web_server", "management", "selector", "upload_tracker"]],
         check_role => '*',
         setter => sub {
             my ($self, $val, $set, $mc) = @_;
@@ -221,6 +225,32 @@ our $tunables = {
         check_type => "bool",
     },
 
+    'enable_reproxy' => {
+        des => "Enable 'reproxying' (end-user-transparent internal redirects) to either local files or other URLs.  When enabled, the backend servers in the pool that this service is configured for will have access to tell this Perlbal instance to serve any local readable file, or connect to any other URL that this Perlbal can connect to.  Only enable this if you trust the backend web nodes.",
+        default => 0,
+        check_role => "reverse_proxy",
+        check_type => "bool",
+    },
+
+    'upload_status_listeners' => {
+        des => "Comma separated list of hosts in form 'a.b.c.d:port' which will receive UDP upload status packets no faster than once a second per HTTP request (PUT/POST) from clients that have requested an upload status bar, which they request by appending the URL get argument ?client_up_session=[xxxxxx] where xxxxx is 5-50 'word' characters (a-z, A-Z, 0-9, underscore).",
+        default => "",
+        check_role => "reverse_proxy",
+        check_type => sub {
+            my ($self, $val, $errref) = @_;
+            my @packed;
+            foreach my $ipa (grep { $_ } split(/\s*,\s*/, $val)) {
+                unless ($ipa =~ /^(\d+\.\d+\.\d+\.\d+):(\d+)$/) {
+                    $$errref = "Invalid UDP endpoint: \"$ipa\".  Must be of form a.b.c.d:port";
+                    return 0;
+                }
+                push @packed, scalar Socket::sockaddr_in($2, Socket::inet_aton($1));
+            }
+            $self->{upload_status_listeners_sockaddr} = \@packed;
+            return 1;
+        },
+    },
+
     'min_put_directory' => {
         des => "If PUT requests are enabled, require this many levels of directories to already exist.  If not, fail.",
         default => 0,   # no limit
@@ -275,7 +305,7 @@ our $tunables = {
                 return 0;
             }
 
-            return 1 if $self->{trusted_upstreams} = Net::Netmask->new2($val);
+            return 1 if $self->{trusted_upstream_proxies} = Net::Netmask->new2($val);
             $$errref = "Error defining trusted upstream proxies: " . Net::Netmask::errstr();
             return 0;
         },
@@ -327,7 +357,7 @@ our $tunables = {
             my ($self, $val, $errref) = @_;
             #FIXME: require absolute paths?
             return 1 if $val && -d $val;
-            $$errref = "Directory not found for service $self->{name} (buffer_uploads_path)";
+            $$errref = "Directory ($val) not found for service $self->{name} (buffer_uploads_path)";
             return 0;
         },
     },
@@ -420,7 +450,7 @@ sub new {
     $self->{buffer_uploads_path} = undef;
 
     # don't have an object for this yet
-    $self->{trusted_upstreams} = undef;
+    $self->{trusted_upstream_proxies} = undef;
 
     # bare data structure for extra header info
     $self->{extra_headers} = { remove => [], insert => [] };
@@ -585,8 +615,9 @@ sub set {
     return $mc->err("Unknown service parameter '$key'");
 }
 
-# run the hooks in a list one by one until one hook returns 1.  returns
-# 1 or 0 depending on if any hooks handled the request.
+# run the hooks in a list one by one until one hook returns a true
+# value.  returns 1 or 0 depending on if any hooks handled the
+# request.
 sub run_hook {
     my Perlbal::Service $self = shift;
     my $hook = shift;
@@ -594,7 +625,7 @@ sub run_hook {
         # call all the hooks until one returns true
         foreach my $hookref (@$ref) {
             my $rval = $hookref->[1]->(@_);
-            return 1 if defined $rval && $rval;
+            return 1 if $rval;
         }
     }
     return 0;
@@ -815,14 +846,12 @@ sub register_boredom {
     # now try to fetch a client for it
     my Perlbal::ClientProxy $cp = $self->get_client;
     if ($cp) {
-        if ($be->assign_client($cp)) {
-            return;
-        } else {
-            # don't want to lose client, so we (unfortunately)
-            # stick it at the end of the waiting queue.
-            # fortunately, assign_client shouldn't ever fail.
-            $self->request_backend_connection($cp);
-        }
+        return if $be->assign_client($cp);
+
+        # don't want to lose client, so we (unfortunately)
+        # stick it at the end of the waiting queue.
+        # fortunately, assign_client shouldn't ever fail.
+        $self->request_backend_connection($cp);
     }
 
     # don't hang onto more bored, persistent connections than
@@ -872,10 +901,12 @@ sub note_bad_backend_connect {
     $self->spawn_backends;
 }
 
-sub request_backend_connection {
+sub request_backend_connection { # : void
     my Perlbal::Service $self;
     my Perlbal::ClientProxy $cp;
     ($self, $cp) = @_;
+
+    return unless $cp && ! $cp->{closed};
 
     my $hi_pri = 0;  # by default, low priority
 
@@ -927,6 +958,9 @@ sub request_backend_connection {
             $self->spawn_backends;
             return;
         }
+
+        # assign client can end up closing the connection, so check for that
+        return if $cp->{closed};
     }
 
     if ($hi_pri) {
@@ -1024,7 +1058,7 @@ sub trusted_ip {
 
     return 1 if $self->{'always_trusted'};
 
-    my $tmap = $self->{trusted_upstreams};
+    my $tmap = $self->{trusted_upstream_proxies};
     return 0 unless $tmap;
 
     # try to use it as a Net::Netmask object
@@ -1111,8 +1145,15 @@ sub enable {
         return 0;
     }
 
-    # create listening socket
-    if ($self->{listen}) {
+    my $listener;
+
+    # create UDP upload tracker listener
+    if ($self->{role} eq "upload_tracker") {
+        $listener = Perlbal::UploadListener->new($self->{listen}, $self);
+    }
+
+    # create TCP listening socket
+    if (! $listener && $self->{listen}) {
         my $opts = {};
         if ($self->{enable_ssl}) {
             $opts->{ssl} = {
@@ -1130,10 +1171,11 @@ sub enable {
             $mc && $mc->err("Can't start service '$self->{name}' on $self->{listen}: $Perlbal::last_error");
             return 0;
         }
-        $self->{listener} = $tl;
+        $listener = $tl;
     }
 
-    $self->{enabled} = 1;
+    $self->{listener} = $listener;
+    $self->{enabled}  = 1;
     return $mc ? $mc->ok : 1;
 }
 
