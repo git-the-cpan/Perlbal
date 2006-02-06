@@ -1,3 +1,42 @@
+1.41: 2006-02-06
+
+    -- IE sends a request header like "If-Modified-Since: <DATE>;
+       length=<length>" so we have to remove the length bit before
+       comparing it with our date then we save the length to compare
+       later.
+
+    -- support for reproxying to a named service.  if backend returns
+       "X-Reproxy-Service: <name>" and no content, the entire original
+       client GET/HEAD request is re-sent to the new named service.
+       the "enable_reproxy" option has to be enabled for the original
+       service.
+
+1.40: 2006-01-17
+
+    -- support for optional retrying of requests after a 500 error,
+       so user won't see the 500 error.  boolean option, as well
+       as configurable schedule of how often to retry backends.
+
+    -- clean up directory indexing HTML: Mark Smith and Fred Moyer
+       (fred@redhotpenguin.com)
+
+1.39: (beta for 1.40) 2005-10-26
+
+    -- new feature for virtual host plugin:  the Host header can be trumped
+       by a magical URL form, if allowed in config.  for instance, you can
+       make an HTTP request to host "foo.com" but actually get "bar.com"
+       if you do this:
+
+          VHOST foo.com;using:bar.com  = bar
+
+       and request /__using/bar.com/IDENT from foo.com, where IDENT is
+       just \w+.  perlbal then updates the Host record to bar.com and
+       sends request URI (unaltered) to the "bar" service.
+
+       this is useful for circumventing browser host restrictions (java,
+       javascript, flash, etc...) when you actually control both
+       domains.
+
 1.38: (beta for 1.40) 2005-10-19
 
     -- some paranoia evals around some parts of buffered uploads that
