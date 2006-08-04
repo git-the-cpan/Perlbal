@@ -26,6 +26,7 @@ use fields (
             'docroot',            # document root for webserver role
             'dirindexing',        # bool: direcotry indexing?  (for webserver role)  not async.
             'index_files',        # arrayref of filenames to try for index files
+            'enable_concatenate_get',   # bool:  if user can request concatenated files
             'enable_put', # bool: whether PUT is supported
             'max_put_size', # int: max size in bytes of a put file
             'min_put_directory', # int: number of directories required to exist at beginning of URIs in put
@@ -84,6 +85,7 @@ use fields (
 
             'enable_error_retries',  # bool: whether we should retry requests after errors
             'error_retry_schedule',  # string of comma-separated seconds (full or partial) to delay between retries
+            'latency',               # int: milliseconds of latency to add to request
             );
 
 
@@ -268,6 +270,13 @@ our $tunables = {
         check_type => "bool",
     },
 
+    'enable_concatenate_get' => {
+        des => "Enable Perlbal's multiple-files-in-one-request mode, where a client have use a comma-separated list of files to return, always in text/plain.  Useful for webapps which have dozens/hundreds of tiny css/js files, and don't trust browsers/etc to do pipelining.  Decreases overall roundtrip latency a bunch, but requires app to be modified to support it.  See t/17-concat.t test for details.",
+        default => 0,
+        check_role => "web_server",
+        check_type => "bool",
+    },
+
     'connect_ahead' => {
         des => "How many extra backend connections we keep alive in addition to the current ones, in anticipation of new client connections.",
         default => 0,
@@ -393,6 +402,13 @@ our $tunables = {
         check_type => "int",
     },
 
+    'latency' => {
+        des => "Forced latency (in milliseconds) to add to request.",
+        default => 0,
+        check_role => "selector",
+        check_type => "int",
+    },
+
     'enable_ssl' => {
         des => "Enable SSL to the client.",
         default => 0,
@@ -462,6 +478,7 @@ sub new {
     $self->{waiting_clients} = [];
     $self->{waiting_clients_highpri} = [];
     $self->{waiting_client_count} = 0;
+    $self->{waiting_client_map} = {};
 
     # buffered upload setup
     $self->{buffer_uploads_path} = undef;
@@ -471,6 +488,15 @@ sub new {
 
     # bare data structure for extra header info
     $self->{extra_headers} = { remove => [], insert => [] };
+
+    # things to watch...
+    foreach my $v (qw(pending_connects bored_backends waiting_clients
+                      waiting_clients_highpri backend_no_spawn
+                      waiting_client_map
+                      )) {
+        die "Field '$v' not set" unless $self->{$v};
+        Perlbal::track_var("svc-$name-$v", $self->{$v});
+    }
 
     return $self;
 }

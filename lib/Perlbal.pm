@@ -37,13 +37,13 @@ use IO::File;
 
 # Try and use IO::AIO or Linux::AIO, if it's around.
 BEGIN {
-    $Perlbal::OPTMOD_IO_AIO        = eval "use IO::AIO (); 1;";
-    $Perlbal::OPTMOD_LINUX_AIO     = eval "use Linux::AIO 1.3; 1;";
+    $Perlbal::OPTMOD_IO_AIO        = eval "use IO::AIO 1.6 (); 1;";
+    $Perlbal::OPTMOD_LINUX_AIO     = eval "use Linux::AIO 1.71; 1;";
 }
 
 $Perlbal::AIO_MODE = "none";
 $Perlbal::AIO_MODE = "ioaio" if $Perlbal::OPTMOD_IO_AIO;
-$Perlbal::AIO_MODE = "linux"  if $Perlbal::OPTMOD_LINUX_AIO;
+$Perlbal::AIO_MODE = "linux" if $Perlbal::OPTMOD_LINUX_AIO;
 
 use Sys::Syslog;
 
@@ -52,6 +52,12 @@ use BSD::Resource;
 use Carp qw(cluck croak);
 use Errno qw(EBADF);
 use POSIX ();
+
+our(%TrackVar);
+sub track_var {
+    my ($name, $ref) = @_;
+    $TrackVar{$name} = $ref;
+}
 
 use Perlbal::AIO;
 use Perlbal::HTTPHeaders;
@@ -204,6 +210,22 @@ sub run_manage_commands {
     return 1;
 }
 
+# allows ${ip:eth0} in config.  currently the only supported expansion
+sub _expand_config_var {
+    my $cmd = shift;
+    $cmd =~ /^(\w+):(.+)/
+        or die "Unknown config variable: $cmd\n";
+    my ($type, $val) = ($1, $2);
+    if ($type eq "ip") {
+        die "Bogus-looking iface name" unless $val =~ /^\w+$/;
+        my $conf = `/sbin/ifconfig $val`;
+        $conf =~ /inet addr:(\S+)/
+            or die "Can't find IP of interface '$val'";
+        return $1;
+    }
+    die "Unknown config variable type: $type\n";
+}
+
 # returns 1 if command succeeded, 0 otherwise
 sub run_manage_command {
     my ($cmd, $out, $ctx) = @_;  # $out is output stream closure
@@ -216,6 +238,9 @@ sub run_manage_command {
     my $orig = $cmd; # save original case for some commands
     $cmd =~ s/^([^=]+)/lc $1/e; # lowercase everything up to an =
     return 1 unless $cmd =~ /^\S/;
+
+    # expand variables
+    $cmd =~ s/\$\{(.+?)\}/_expand_config_var($1)/eg;
 
     $out ||= sub {};
     $ctx ||= Perlbal::CommandContext->new;
@@ -259,6 +284,44 @@ sub run_manage_command {
     }
 
     return $mc->err("unknown command: $basecmd");
+}
+
+sub MANAGE_varsize {
+    my $mc = shift->no_opts;
+
+    my $emit;
+    $emit = sub {
+        my ($v, $depth, $name) = @_;
+        $name ||= "";
+
+        my $show;
+        if (ref $v eq "ARRAY") {
+            return unless @$v;
+            $show = "[] " . scalar @$v;
+        }
+        elsif (ref $v eq "HASH") {
+            return unless %$v;
+            $show = "{} " . scalar keys %$v;
+        }
+        else {
+            $show = " = $v";
+        }
+        my $pre = "  " x $depth;
+        $mc->out("$pre$name $show");
+
+        if (ref $v eq "HASH") {
+            foreach my $k (sort keys %$v) {
+                $emit->($v->{$k}, $depth+1, "{$k}");
+            }
+        }
+    };
+
+    foreach my $k (sort keys %TrackVar) {
+        my $v = $TrackVar{$k} or next;
+        $emit->($v, 0, $k);
+    }
+
+    $mc->end;
 }
 
 sub MANAGE_obj {
