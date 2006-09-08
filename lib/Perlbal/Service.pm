@@ -12,6 +12,7 @@ use warnings;
 no  warnings qw(deprecated);
 
 use Perlbal::BackendHTTP;
+use Perlbal::Cache;
 
 use fields (
             'name',            # scalar: name of this service
@@ -20,6 +21,7 @@ use fields (
 
             'pool',            # Perlbal::Pool that we're using to allocate nodes if we're in proxy mode
             'listener',        # Perlbal::TCPListener object, when enabled
+            'reproxy_cache',             # Perlbal::Cache object, when enabled
 
             # end-user tunables
             'listen',             # scalar IP:port of where we're listening for new connections
@@ -48,10 +50,12 @@ use fields (
             'trusted_upstream_proxies', # Net::Netmask object containing netmasks for trusted upstreams
             'always_trusted', # bool; if true, always trust upstreams
             'enable_reproxy', # bool; if true, advertise that server will reproxy files and/or URLs
+            'reproxy_cache_maxsize', # int; maximum number of reproxy results to be cached. (0 is disabled and default)
 
             # Internal state:
             'waiting_clients',         # arrayref of clients waiting for backendhttp conns
             'waiting_clients_highpri', # arrayref of high-priority clients waiting for backendhttp conns
+            'waiting_clients_lowpri',  # arrayref of low-priority clients waiting for backendhttp conns
             'waiting_client_count',    # number of clients waiting for backendds
             'waiting_client_map'  ,    # map of clientproxy fd -> 1 (if they're waiting for a conn)
             'pending_connects',        # hashref of "ip:port" -> $time (only one pending connect to backend at a time)
@@ -86,6 +90,10 @@ use fields (
             'enable_error_retries',  # bool: whether we should retry requests after errors
             'error_retry_schedule',  # string of comma-separated seconds (full or partial) to delay between retries
             'latency',               # int: milliseconds of latency to add to request
+
+            # stats:
+            '_stat_requests',       # total requests to this service
+            '_stat_cache_hits',     # total requests to this service that were served via the reproxy-url cache
             );
 
 # hash; 'role' => coderef to instantiate a client for this role
@@ -244,6 +252,23 @@ our $tunables = {
         default => 0,
         check_role => "reverse_proxy",
         check_type => "bool",
+    },
+
+    'reproxy_cache_maxsize' => {
+        des => "Set the maximum number of cached reproxy results (X-REPROXY-CACHE-FOR) that may be kept in the service cache. These cached requests take up about 1.25KB of ram each (on Linux x86), but will vary with usage. Perlbal still starts with 0 in the cache and will grow over time. Be careful when adjusting this and watch your ram usage like a hawk.",
+        default => 0,
+        check_role => "reverse_proxy",
+        check_type => "int",
+        setter => sub {
+            my ($self, $val, $set, $mc) = @_;
+            if ($val) {
+                $self->{reproxy_cache} ||= Perlbal::Cache->new(maxsize => 1);
+                $self->{reproxy_cache}->set_maxsize($val);
+            } else {
+                $self->{reproxy_cache} = undef;
+            }
+            return $mc->ok;
+        },
     },
 
     'upload_status_listeners' => {
@@ -487,6 +512,7 @@ sub new {
     # waiting clients
     $self->{waiting_clients} = [];
     $self->{waiting_clients_highpri} = [];
+    $self->{waiting_clients_lowpri}  = [];
     $self->{waiting_client_count} = 0;
     $self->{waiting_client_map} = {};
 
@@ -892,17 +918,26 @@ sub get_client {
     # find a high-priority client, or a regular one
     my Perlbal::ClientProxy $cp;
     while ($hp_first && ($cp = shift @{$self->{waiting_clients_highpri}})) {
+        next if $cp->{closed};
         if (Perlbal::DEBUG >= 2) {
             my $backlog = scalar @{$self->{waiting_clients}};
             print "Got from fast queue, in front of $backlog others\n";
         }
-        return $ret->($cp) if ! $cp->{closed};
+        return $ret->($cp);
     }
+
+    # regular clients:
     while ($cp = shift @{$self->{waiting_clients}}) {
-        if (Perlbal::DEBUG >= 2) {
-            print "Backend requesting client, got normal = $cp->{fd}.\n" unless $cp->{closed};
-        }
-        return $ret->($cp) if ! $cp->{closed};
+        next if $cp->{closed};
+        print "Backend requesting client, got normal = $cp->{fd}.\n" if Perlbal::DEBUG >= 2;
+        return $ret->($cp);
+    }
+
+    # low-priority (batch/idle) clients.
+    while ($cp = shift @{$self->{waiting_clients_lowpri}}) {
+        next if $cp->{closed};
+        print "Backend requesting client, got low priority = $cp->{fd}.\n" if Perlbal::DEBUG >= 2;
+        return $ret->($cp);
     }
 
     return undef;
@@ -1011,7 +1046,8 @@ sub request_backend_connection { # : void
 
     return unless $cp && ! $cp->{closed};
 
-    my $hi_pri = 0;  # by default, low priority
+    my $hi_pri = 0;  # by default, regular priority
+    my $low_pri = 0;  # FIXME: way for hooks to set this
 
     # is there a defined high-priority cookie?
     if (my $cname = $self->{high_priority_cookie}) {
@@ -1029,7 +1065,9 @@ sub request_backend_connection { # : void
     # now, call hook to see if this should be high priority
     $hi_pri = $self->run_hook('make_high_priority', $cp)
         unless $hi_pri; # only if it's not already
+
     $cp->{high_priority} = 1 if $hi_pri;
+    $cp->{low_priority} = 1 if $low_pri;
 
     # before we even consider spawning backends, let's see if we have
     # some bored (pre-connected) backends that'd take this client
@@ -1068,6 +1106,8 @@ sub request_backend_connection { # : void
 
     if ($hi_pri) {
         push @{$self->{waiting_clients_highpri}}, $cp;
+    } elsif ($low_pri) {
+        push @{$self->{waiting_clients_lowpri}}, $cp;
     } else {
         push @{$self->{waiting_clients}}, $cp;
     }
@@ -1313,7 +1353,7 @@ sub stats_info
     my $now = time;
 
     $out->("SERVICE $self->{name}");
-    $out->("     listening: $self->{listen}");
+    $out->("     listening: " . ($self->{listen} || "--"));
     $out->("          role: $self->{role}");
     if ($self->{role} eq "reverse_proxy" ||
         $self->{role} eq "web_server") {
@@ -1327,6 +1367,23 @@ sub stats_info
         }
     }
     if ($self->{role} eq "reverse_proxy") {
+        if ($self->{reproxy_cache}) {
+            my $hits     = $self->{_stat_cache_hits} || 0;
+            my $hit_rate = sprintf("%0.02f%%", eval { $hits / ($self->{_stat_requests} || 0) * 100 } || 0);
+
+            my $size     = eval { $self->{reproxy_cache}->size };
+            $size = defined($size) ? $size : 'undef';
+
+            my $maxsize  = eval { $self->{reproxy_cache}->maxsize };
+            $maxsize = defined ($maxsize) ? $maxsize : 'undef';
+
+            my $sizepercent = eval { sprintf("%0.02f%%", $size / $maxsize * 100) } || 'undef';
+
+            $out->("    cache size: $size/$maxsize ($sizepercent)");
+            $out->("    cache hits: $hits");
+            $out->("cache hit rate: $hit_rate");
+        }
+
         my $bored_count = scalar @{$self->{bored_backends}};
         $out->(" connect-ahead: $bored_count/$self->{connect_ahead}");
         if ($self->{pool}) {
@@ -1356,6 +1413,51 @@ sub name {
 sub listenaddr {
     my Perlbal::Service $self = $_[0];
     return $self->{listen};
+}
+
+sub reproxy_cache {
+    my Perlbal::Service $self = $_[0];
+    return $self->{reproxy_cache};
+}
+
+sub add_to_reproxy_url_cache {
+    my Perlbal::Service $self;
+    my ($reqhd, $reshd);
+
+    ($self, $reqhd, $reshd) = @_;
+
+    # is caching enabled on this service?
+    my $cache = $self->{reproxy_cache} or
+        return 0;
+
+    # these should always be set anyway, from BackendHTTP:
+    my $reproxy_cache_for = $reshd->header('X-REPROXY-CACHE-FOR') or  return 0;
+    my $urls              = $reshd->header('X-REPROXY-URL')       or  return 0;
+
+    my ($timeout_delta, $cache_headers) = split ';', $reproxy_cache_for, 2;
+    my $timeout = $timeout_delta ? time() + $timeout_delta : undef;
+
+    my $hostname = $reqhd->header("Host") || '';
+    my $requri   = $reqhd->request_uri    || '';
+    my $key = "$hostname|$requri";
+
+    my @headers;
+    foreach my $header (split /\s+/, $cache_headers) {
+        my $value;
+        next unless $header && ($value = $reshd->header($header));
+        $value  = _ref_to($value) if uc($header) eq 'CONTENT-TYPE';
+        push @headers, _ref_to($header), $value;
+    }
+
+    $cache->set($key, [$timeout, \@headers, $urls]);
+}
+
+# given a string, return a shared reference to that string.  to save
+# memory when lots of same string is stored.
+my %refs;
+sub _ref_to {
+    my $key = shift;
+    return $refs{$key} || ($refs{$key} = \$key);
 }
 
 1;

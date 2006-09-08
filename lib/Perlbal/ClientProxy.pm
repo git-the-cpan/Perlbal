@@ -15,6 +15,7 @@ use fields (
             'backend_requested',   # true if we've requested a backend for this request
             'reconnect_count',     # number of times we've tried to reconnect to backend
             'high_priority',       # boolean; 1 if we are or were in the high priority queue
+            'low_priority',        # boolean; 1 if we are or were in the low priority queue
             'reproxy_uris',        # arrayref; URIs to reproxy to, in order
             'reproxy_expected_size', # int: size of response we expect to get back for reproxy
             'currently_reproxying',  # arrayref; the host info and URI we're reproxying right now
@@ -120,6 +121,7 @@ sub start_reproxy_service {
 
     $self->{backend_requested} = 0;
     $self->{backend} = undef;
+    $self->{res_headers} = $primary_res_hdrs;
 
     $svc->adopt_base_client($self);
 }
@@ -726,8 +728,63 @@ sub handle_request {
     } else {
         # get the backend request process moving, since we aren't buffering
         $self->{is_buffering} = 0;
+
+        # if reproxy-caching is enabled, we can often bypass needing to allocate a BackendHTTP connection:
+        return if $svc->{reproxy_cache} && $self->satisfy_request_from_cache;
+
         $self->request_backend;
     }
+}
+
+sub satisfy_request_from_cache {
+    my Perlbal::ClientProxy $self = shift;
+
+    my $req_hd = $self->{req_headers};
+    my $svc    = $self->{service};
+    my $cache  = $svc->{reproxy_cache};
+    $svc->{_stat_requests}++;
+
+    my $requri   = $req_hd->request_uri    || '';
+    my $hostname = $req_hd->header("Host") || '';
+
+    my $key      = "$hostname|$requri";
+
+    my $reproxy  = $cache->get($key) or
+        return 0;
+
+    my ($timeout, $headers, $urls) = @$reproxy;
+    return 0 if time() > $timeout;
+
+    $svc->{_stat_cache_hits}++;
+    my %headers = map { ref $_ eq 'SCALAR' ? $$_ : $_ } @{$headers || []};
+
+    if (my $ims = $req_hd->header("If-Modified-Since")) {
+        my ($lm_key) = grep { uc($_) eq "LAST-MODIFIED" } keys %headers;
+        my $lm = $headers{$lm_key} || "";
+
+        # remove the IE length suffix
+        $ims =~ s/; length=(\d+)//;
+
+        # If 'Last-Modified' is same as 'If-Modified-Since', send a 304
+        if ($ims eq $lm) {
+            my $res_hd = Perlbal::HTTPHeaders->new_response(304);
+            $res_hd->header("Content-Length", "0");
+            $self->tcp_cork(1);
+            $self->state('xfer_resp');
+            $self->write($res_hd->to_string_ref);
+            $self->write(sub { $self->http_response_sent; });
+            return 1;
+        }
+    }
+
+    my $res_hd = Perlbal::HTTPHeaders->new_response(200);
+    $res_hd->header("Date", HTTP::Date::time2str(time()));
+    while (my ($key, $value) = each %headers) {
+        $res_hd->header($key, $value);
+    }
+
+    $self->start_reproxy_uri($res_hd, $urls);
+    return 1;
 }
 
 # return 1 to steal this connection (when they're asking status of an
@@ -1036,6 +1093,7 @@ sub as_string {
             if $self->{write_buf_size} > 0;
     }
     $ret .= "; highpri" if $self->{high_priority};
+    $ret .= "; lowpri" if $self->{low_priority};
     $ret .= "; responded" if $self->{responded};
     $ret .= "; waiting_for=" . $self->{content_length_remain}
         if defined $self->{content_length_remain};

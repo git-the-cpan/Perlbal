@@ -17,10 +17,13 @@ use vars qw(@ISA @EXPORT);
 
 our @webserver_pids;
 
+my $testpid; # of the test suite's main program, the one running the HTTP client
+
 END {
     # ensure we kill off the webserver
-    kill 9, @webserver_pids;
+    kill 9, @webserver_pids if $testpid == $$;
 }
+
 
 sub start_webserver {
     my $port = new_port();
@@ -29,6 +32,8 @@ sub start_webserver {
     if ($ENV{'TEST_PERLBAL_USE_EXISTING'}) {
         return $port;
     }
+
+    $testpid = $$;
 
     if (my $child = fork) {
         # i am parent, wait for child to startup
@@ -197,6 +202,12 @@ sub serve_client {
 
             if ($cmd =~ /^reproxy_url:(.+)/i) {
                 $to_send = $response->(headers => "X-Reproxy-URL: $1\r\n");
+            }
+
+            if ($cmd =~ /^reproxy_url_cached:(\d+):(.+)/i) {
+                kill 'USR1', $testpid;
+                $to_send = $response->(headers =>
+                                       "X-Reproxy-URL: $2\r\nX-Reproxy-Cache-For: $1; Last-Modified Content-Type\r\n");
             }
 
             if ($cmd =~ /^reproxy_url_multi:((?:\d+:){2,})(\S+)/i) {

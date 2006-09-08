@@ -39,7 +39,7 @@ use fields ('client',  # Perlbal::ClientProxy connection, or undef
             'generation', # int; counts what generation we were spawned in
             'buffered_upload_mode', # bool; if on, we're doing a buffered upload transmit
             );
-use Socket qw(PF_INET IPPROTO_TCP SOCK_STREAM);
+use Socket qw(PF_INET IPPROTO_TCP SOCK_STREAM SOL_SOCKET SO_ERROR);
 
 use Perlbal::ClientProxy;
 
@@ -119,6 +119,14 @@ sub new {
 
 sub close {
     my Perlbal::BackendHTTP $self = shift;
+
+    # OSX Gives EPIPE on bad connects, and doesn't fail the connect
+    # so lets treat EPIPE as a event_err so the logic there does
+    # the right thing
+    if (defined $_[0] && $_[0] eq 'EPIPE') {
+        $self->event_err;
+        return;
+    }
 
     # don't close twice
     return if $self->{closed};
@@ -258,6 +266,14 @@ sub event_write {
         $NodeStats{$self->{ipport}}->{connects}++;
         $NodeStats{$self->{ipport}}->{lastconnect} = $now;
 
+        # OSX returns writeable even if the connect fails
+        # so explicitly check for the error
+        # TODO: make a smaller test case and show to the world
+        if (my $error = unpack('i', getsockopt($self->{sock}, SOL_SOCKET, SO_ERROR))) {
+            $self->event_err;
+            return;
+        }
+
         if (defined $self->{service} && $self->{service}->{verify_backend} &&
             !$self->{has_attention} && !defined $NoVerify{$self->{ipport}}) {
 
@@ -367,6 +383,8 @@ sub handle_response { # : void
     }
     $self->{content_length_remain} = $self->{content_length} || 0;
 
+    my $reproxy_cache_for = $hd->header('X-REPROXY-CACHE-FOR') || 0;
+
     # special cases:  reproxying and retrying after server errors:
     if ((my $rep = $hd->header('X-REPROXY-FILE')) && $self->may_reproxy) {
         # make the client begin the async IO while we move on
@@ -374,11 +392,12 @@ sub handle_response { # : void
         $self->next_request;
         return;
     } elsif ((my $urls = $hd->header('X-REPROXY-URL')) && $self->may_reproxy) {
+        $self->{service}->add_to_reproxy_url_cache($rqhd, $hd)
+            if $reproxy_cache_for;
         $client->start_reproxy_uri($self->{res_headers}, $urls);
         $self->next_request;
         return;
     } elsif ((my $svcname = $hd->header('X-REPROXY-SERVICE')) && $self->may_reproxy) {
-        print STDERR "reproxy service!  to '$svcname'.\n";
         $self->{client} = undef;
         $client->start_reproxy_service($self->{res_headers}, $svcname);
         $self->next_request;

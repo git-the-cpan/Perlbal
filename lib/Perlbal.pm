@@ -23,8 +23,17 @@ You can use and redistribute Perlbal under the same terms as Perl itself.
 
 package Perlbal;
 
+BEGIN {
+    # keep track of anonymous subs' origins:
+    $^P = 0x200;
+}
+
+my $has_gladiator  = eval "use Devel::Gladiator; 1;";
+my $has_cycle      = eval "use Devel::Cycle; 1;";
+use Devel::Peek;
+
 use vars qw($VERSION);
-$VERSION = '1.47';
+$VERSION = '1.50';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -34,6 +43,7 @@ use strict;
 use warnings;
 no  warnings qw(deprecated);
 
+use Storable ();
 use IO::Socket;
 use IO::Handle;
 use IO::File;
@@ -289,6 +299,44 @@ sub run_manage_command {
     return $mc->err("unknown command: $basecmd");
 }
 
+sub arena_ref_counts {
+    my $all = Devel::Gladiator::walk_arena();
+    my %ct;
+
+    my %run_cycle;
+    foreach my $it (@$all) {
+        $ct{ref $it}++;
+        if (ref $it eq "CODE") {
+            my $name = Devel::Peek::CvGV($it);
+            $ct{$name}++ if $name =~ /ANON/;
+        }
+    }
+    $all = undef;
+    return \%ct;
+}
+
+my %last_gladiator;
+sub MANAGE_gladiator {
+    my $mc = shift->no_opts;
+    unless ($has_gladiator) {
+        $mc->end;
+        return;
+    }
+
+    my $ct = arena_ref_counts();
+    my $ret;
+    $ret .= "ARENA COUNTS:\n";
+    foreach my $k (sort {$ct->{$b} <=> $ct->{$a}} keys %$ct) {
+        my $delta = $ct->{$k} - ($last_gladiator{$k} || 0);
+        $last_gladiator{$k} = $ct->{$k};
+        next unless $ct->{$k} > 1;
+        $ret .= sprintf(" %4d %-4d $k\n", $ct->{$k}, $delta);
+    }
+
+    $mc->out($ret);
+    $mc->end;
+}
+
 sub MANAGE_varsize {
     my $mc = shift->no_opts;
 
@@ -456,18 +504,23 @@ sub MANAGE_fd {
 sub MANAGE_proc {
     my $mc = shift->no_opts;
 
-    return $mc->err('This command is not available unless BSD::Resource is installed') unless $Perlbal::BSD_RESOURCE_AVAILABLE;
-
-    my $ru = BSD::Resource::getrusage();
-    my ($ut, $st) = ($ru->utime, $ru->stime);
-    my ($udelta, $sdelta) = ($ut - $lastutime, $st - $laststime);
-    my $rdelta = $reqs - $lastreqs;
     $mc->out('time: ' . time());
     $mc->out('pid: ' . $$);
-    $mc->out("utime: $ut (+$udelta)");
-    $mc->out("stime: $st (+$sdelta)");
+
+
+    if ($Perlbal::BSD_RESOURCE_AVAILABLE) {
+        my $ru = BSD::Resource::getrusage();
+        my ($ut, $st) = ($ru->utime, $ru->stime);
+        my ($udelta, $sdelta) = ($ut - $lastutime, $st - $laststime);
+        $mc->out("utime: $ut (+$udelta)");
+        $mc->out("stime: $st (+$sdelta)");
+        ($lastutime, $laststime, $lastreqs) = ($ut, $st, $reqs);
+    }
+
+    my $rdelta = $reqs - $lastreqs;
     $mc->out("reqs: $reqs (+$rdelta)");
-    ($lastutime, $laststime, $lastreqs) = ($ut, $st, $reqs);
+    $lastreqs = $reqs;
+
     $mc->end;
 }
 
@@ -541,8 +594,11 @@ sub MANAGE_uptime {
 
     $mc->out("starttime $starttime");
     $mc->out("uptime " . (time() - $starttime));
+    $mc->out("version $Perlbal::VERSION");
     $mc->end;
 }
+
+*MANAGE_version = \&MANAGE_uptime;
 
 sub MANAGE_track {
     my $mc = shift->no_opts;
@@ -783,7 +839,8 @@ sub MANAGE_show {
     if ($mc->cmd =~ /^show service$/) {
         foreach my $name (sort keys %service) {
             my $svc = $service{$name};
-            $mc->out("$name $svc->{listen} " . ($svc->{enabled} ? "ENABLED" : "DISABLED"));
+            my $listen = $svc->{listen} || "not_listening";
+            $mc->out("$name $listen " . ($svc->{enabled} ? "ENABLED" : "DISABLED"));
         }
         return $mc->end;
     }
@@ -988,6 +1045,16 @@ sub MANAGE_plugins {
     foreach my $svc (values %service) {
         next unless @{$svc->{plugin_order}};
         $mc->out(join(' ', $svc->{name}, @{$svc->{plugin_order}}));
+    }
+    $mc->end;
+}
+
+sub MANAGE_help {
+    my $mc = shift->no_opts;
+    my @commands = sort map { m/^MANAGE_(\S+)$/ ? $1 : () }
+        keys %Perlbal::;
+    foreach my $command (@commands) {
+        $mc->out("$command");
     }
     $mc->end;
 }

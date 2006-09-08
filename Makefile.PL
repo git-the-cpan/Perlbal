@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 #   Perl Makefile for Perlbal
-#   $Id: Makefile.PL 483 2006-08-07 18:07:06Z bradfitz $
+#   $Id: Makefile.PL 554 2006-09-03 09:18:05Z hachi $
 #
 #   Invoke with 'perl Makefile.PL'
 #
@@ -27,6 +27,8 @@ WriteMakefile(
         'Danga::Socket' => '1.44',
         'Sys::Syscall'  => 0,
         'BSD::Resource' => 0,
+        'HTTP::Date'    => 0,
+        'HTTP::Response' => 0,
         'Test::More'    => 0,
         'File::Find'    => 0,
         'Time::HiRes'   => 0,

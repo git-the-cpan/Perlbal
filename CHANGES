@@ -1,3 +1,22 @@
+1.50: 2006-09-08
+
+    -- add in optional Devel::Gladiator usage for memory tracking
+
+    -- fix memory leaks in concatenanted GETs on error cases
+
+    -- fixes to run / run better on OS X (Artur Bergman)
+
+1.49: 2006-08-30
+
+    -- Very basic help hints command, simply dumps all possible commands.
+
+    -- Add another statistic for reproxy caches, the current size of a particular
+       service's cache, maximum size, and fill percentage.
+
+1.48: 2006-08-18
+
+    -- optionally cache in-process the results of X-Reproxy-URL reponses
+
 1.47: 2006-08-15
 
     -- concatenanted GETs sent 304 Not Modified w/ content-lengths.  should
