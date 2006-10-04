@@ -33,7 +33,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.50';
+$VERSION = '1.51';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -48,18 +48,11 @@ use IO::Socket;
 use IO::Handle;
 use IO::File;
 
-# Try and use IO::AIO or Linux::AIO, if it's around.
-BEGIN {
-    $Perlbal::OPTMOD_IO_AIO        = eval "use IO::AIO 1.6 (); 1;";
-    $Perlbal::OPTMOD_LINUX_AIO     = eval "use Linux::AIO 1.71; 1;";
-}
-
-$Perlbal::AIO_MODE = "none";
-$Perlbal::AIO_MODE = "ioaio" if $Perlbal::OPTMOD_IO_AIO;
-$Perlbal::AIO_MODE = "linux" if $Perlbal::OPTMOD_LINUX_AIO;
-
 $Perlbal::SYSLOG_AVAILABLE = eval { require Sys::Syslog; 1; };
 $Perlbal::BSD_RESOURCE_AVAILABLE = eval { require BSD::Resource; 1; };
+
+# incremented every second by a timer:
+$Perlbal::tick_time = time();
 
 use Getopt::Long;
 use Carp qw(cluck croak);
@@ -88,13 +81,6 @@ use Perlbal::Pool;
 use Perlbal::ManageCommand;
 use Perlbal::CommandContext;
 use Perlbal::Util;
-
-END {
-    Linux::AIO::max_parallel(0)
-        if $Perlbal::OPTMOD_LINUX_AIO;
-    IO::AIO::max_parallel(0)
-        if $Perlbal::OPTMOD_IO_AIO;
-}
 
 $SIG{'PIPE'} = "IGNORE";  # handled manually
 
@@ -396,11 +382,7 @@ sub MANAGE_shutdown {
     my $mc = shift->parse(qr/^shutdown( graceful)?$/);
 
     # immediate shutdown
-    unless ($mc->arg(1)) {
-        Linux::AIO::max_parallel(0) if $Perlbal::OPTMOD_LINUX_AIO;
-        IO::AIO::max_parallel(0)    if $Perlbal::OPTMOD_IO_AIO;
-        exit(0);
-    }
+    exit(0) unless $mc->arg(1);
 
     # set connect ahead to 0 for all services so they don't spawn extra backends
     foreach my $svc (values %service) {
@@ -1136,6 +1118,7 @@ sub run {
 
     Danga::Socket->SetLoopTimeout(1000);
     Danga::Socket->SetPostLoopCallback(sub {
+        $Perlbal::tick_time = time();
         Perlbal::Socket::run_callbacks();
         return 1;
     });

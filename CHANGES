@@ -1,3 +1,13 @@
+1.51: 2006-10-04
+
+    -- set alive_time during slow PUTs.  was causing problems
+       replicating large files in mogile, hitting fake idle timeout.
+
+    -- pipelining HTTP injection fix.
+
+    -- include Host header to reproxy backends
+           patch by Jonty Wareing <jonty.wareing@gmail.com>
+
 1.50: 2006-09-08
 
     -- add in optional Devel::Gladiator usage for memory tracking
