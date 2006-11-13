@@ -8,7 +8,7 @@
 # for another request from the user
 #
 # Copyright 2004, Danga Interactice, Inc.
-# Copyright 2005, Six Apart, Ltd.
+# Copyright 2005-2006, Six Apart, Ltd.
 
 package Perlbal::ClientHTTPBase;
 use strict;
@@ -316,6 +316,7 @@ sub event_write_reproxy_fh {
         return;
     }
 
+    Perlbal::AIO::set_file_for_channel($self->{reproxy_file});
     Perlbal::AIO::aio_readahead($self->{reproxy_fh},
                                 $self->{reproxy_file_offset},
                                 $to_send, $postread);
@@ -385,9 +386,13 @@ sub _serve_request {
     Perlbal::AIO::aio_stat($file, sub {
         # client's gone anyway
         return if $self->{closed};
-        return $self->_simple_response(404) unless -e _;
+        unless (-e _) {
+            return if $self->{service}->run_hook('static_get_poststat_file_missing', $self);
+            return $self->_simple_response(404);
+        }
 
-        my $lastmod = HTTP::Date::time2str((stat(_))[9]);
+        my $mtime   = (stat(_))[9];
+        my $lastmod = HTTP::Date::time2str($mtime);
         my $ims     = $hd->header("If-Modified-Since") || "";
 
         # IE sends a request header like "If-Modified-Since: <DATE>; length=<length>"
@@ -420,6 +425,7 @@ sub _serve_request {
             # partial content
             $res = $self->{res_headers} = Perlbal::HTTPHeaders->new_response(206);
         } else {
+            return if $self->{service}->run_hook('static_get_poststat_pre_send', $self, $mtime);
             $res = $self->{res_headers} = Perlbal::HTTPHeaders->new_response(200);
         }
 
@@ -555,6 +561,7 @@ sub _serve_request_multiple_poststat {
     foreach my $f (@$filelist) {
         my $stat = $stats->{$f};
         unless (S_ISREG($stat->[2] || 0)) {
+            return if $self->{service}->run_hook('concat_get_poststat_file_missing', $self);
             return $self->_simple_response(404, "One or more file does not exist");
         }
         if (!$mime && $f =~ /\.(\w+)$/ && $MimeType->{$1}) {
@@ -577,11 +584,14 @@ sub _serve_request_multiple_poststat {
         $ims_len = $1;
     }
 
+    # What is -f _ doing here? don't we detect the existance of all files above in the loop?
     my $not_mod = $ims eq $lastmod && -f _;
+
     my $res;
     if ($not_mod) {
         $res = $self->{res_headers} = Perlbal::HTTPHeaders->new_response(304);
     } else {
+        return if $self->{service}->run_hook('concat_get_poststat_pre_send', $self, $most_recent_mod);
         $res = $self->{res_headers} = Perlbal::HTTPHeaders->new_response(200);
         $res->header("Content-Length", $sum_length);
     }

@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 # Copyright 2004, Danga Interactice, Inc.
-# Copyright 2005, Six Apart, Ltd.
+# Copyright 2005-2006, Six Apart, Ltd.
 #
 
 =head1 NAME
@@ -15,7 +15,7 @@ Perlbal - Reverse-proxy load balancer and webserver
 =head1 COPYRIGHT AND LICENSE
 
 Copyright 2004, Danga Interactice, Inc.
-Copyright 2005, Six Apart, Ltd.
+Copyright 2005-2006, Six Apart, Ltd.
 
 You can use and redistribute Perlbal under the same terms as Perl itself.
 
@@ -33,7 +33,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.51';
+$VERSION = '1.52';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -1037,6 +1037,18 @@ sub MANAGE_help {
         keys %Perlbal::;
     foreach my $command (@commands) {
         $mc->out("$command");
+    }
+    $mc->end;
+}
+
+sub MANAGE_aio {
+    my $mc = shift->no_opts;
+    my $stats = Perlbal::AIO::get_aio_stats();
+    foreach my $c (sort keys %$stats) {
+        my $r = $stats->{$c};
+        foreach my $k (keys %$r) {
+            $mc->out("$c $k $r->{$k}");
+        }
     }
     $mc->end;
 }

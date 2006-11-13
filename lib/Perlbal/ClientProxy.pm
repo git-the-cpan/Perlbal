@@ -2,7 +2,7 @@
 # HTTP Connection from a reverse proxy client
 #
 # Copyright 2004, Danga Interactice, Inc.
-# Copyright 2005, Six Apart, Ltd.
+# Copyright 2005-2006, Six Apart, Ltd.
 #
 package Perlbal::ClientProxy;
 use strict;
@@ -1008,7 +1008,7 @@ sub buffered_upload_update {
         # written out and update as appropriate.
         if ($bytes < $len) {
             my $diff = $len - $bytes;
-            unshift @{$self->{read_buf}}, substr($$bref, $bytes, $diff);
+            unshift @{$self->{read_buf}}, \ substr($$bref, $bytes, $diff);
             $self->{read_ahead} += $diff;
         }
 
