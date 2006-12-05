@@ -1,3 +1,17 @@
+1.53: 2006-12-05
+
+    -- fix a crash as reported on mailing lists, with backends not
+       releasing references to clientproxies when coming through
+       service selectors, and backends then timing out, crashing
+       the server.
+
+    -- if backend sends x-reproxy-url and HTTP 204 No Content, upgrade
+       that to a 200 when sending to the client.
+
+    -- let non-Perlbal::Socket Danga::Socket objects exist without
+       crashing in cleanup handler (allows use of Gearman::Client::Async
+       in plugins)
+
 1.52: 2006-11-13
 
     -- fix crash in buffered uploads when *::AIO doesn't write everything
