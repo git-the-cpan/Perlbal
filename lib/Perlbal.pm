@@ -33,7 +33,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.53';
+$VERSION = '1.54';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -1135,6 +1135,8 @@ sub run {
         Perlbal::Socket::run_callbacks();
         return 1;
     });
+
+    run_global_hook("pre_event_loop");
 
     # begin the overall loop to try to capture if Perlbal dies at some point
     # so we can have a log of it
