@@ -3,8 +3,9 @@
 use strict;
 use Perlbal::Test;
 
-use Test::More tests => 11;
+use Test::More tests => 15;
 require HTTP::Request;
+require HTTP::Date;
 
 my $port = new_port();
 my $dir = tempdir();
@@ -62,6 +63,14 @@ ok(get($url) eq $contents, "GET request");
 # a get with URL parameters
 ok(get("$url?foo=bar") eq $contents, "GET request");
 
+{
+    my $req = HTTP::Request->new(GET => $url, [ 'If-Modified-Since' => HTTP::Date::time2str() ]);
+    my $res = $ua->request($req);
+
+    is($res->code, 304, "Got not modified");
+    is($res->header("Content-Length"), undef, "Shouldn't get a Content-Length header");
+}
+
 # 404 path
 ok(! get("$url/404.txt"), "missing file");
 
@@ -90,6 +99,16 @@ ok(! get("$url/404.txt"), "missing file");
     manage("SET test.index_files = blah.txt");
     $diridx = get($dirurl);
     like($diridx, qr/Directory listing disabled/, "no dirlist again");
+}
+
+# directory traversal should fail
+ok(! get("$url/../foo/bar.txt"), "directory traversal");
+
+# files with '..' in the names should succeed
+{
+    set_path("/foo/foo..123.txt");
+    write_file();
+    ok(get($url) eq $contents, "File with .. in name");
 }
 
 1;
