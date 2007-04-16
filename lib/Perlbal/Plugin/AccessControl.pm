@@ -14,6 +14,8 @@ no  warnings qw(deprecated);
 #
 #     ACCESS {ALLOW,DENY} netmask 127.0.0.1/8
 #     ACCESS {ALLOW,DENY} ip 127.0.0.1
+# also can make a match set the request to go into the low-priority perlbal queue:
+#     ACCESS QUEUE_LOW ip 127.0.0.1
 
 # reset the rule chain and policy:  (policy is allow by default)
 #     ACCESS RESET
@@ -28,7 +30,7 @@ sub load {
 
     Perlbal::register_global_hook('manage_command.access', sub {
         my $mc = shift->parse(qr/^access\s+
-                              (policy|allow|deny|reset)      # cmd
+                              (policy|allow|deny|reset|queue_low)      # cmd
                               (?:\s+(\S+))?                  # arg1
                               (?:\s+(\S+))?                  # optional arg2
                               $/x,
@@ -57,7 +59,7 @@ sub load {
             return $mc->ok;
         }
 
-        if ($cmd eq "allow" || $cmd eq "deny") {
+        if ($cmd eq "allow" || $cmd eq "deny" || $cmd eq "queue_low") {
             my ($what, $val) = ($arg1, $arg2);
             return $mc->err("Unknown item to $cmd: '$what'") unless
                 $what && ($what eq "ip" || $what eq "netmask");
@@ -104,9 +106,20 @@ sub register {
             return 1;
         };
 
+        my $queue_low = sub {
+            $client->set_queue_low;
+            return 0;
+        };
+
         my $rule_action = sub {
             my $rule = shift;
-            return $rule->[0] eq "deny" ? $deny->() : $allow->();
+            if ($rule->[0] eq "deny") {
+                return $deny->();
+            } elsif ($rule->[0] eq "allow") {
+                return $allow->();
+            } elsif ($rule->[0] eq "queue_low") {
+                return $queue_low->();
+            }
         };
 
         my $match = sub {

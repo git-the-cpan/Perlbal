@@ -90,6 +90,7 @@ sub init {
 
     $self->{backend} = undef;
     $self->{high_priority} = 0;
+    $self->{low_priority} = 0;
 
     $self->{responded} = 0;
     $self->{unread_data_waiting} = 0;
@@ -1218,6 +1219,19 @@ sub as_string {
 
     return $ret;
 }
+
+sub set_queue_low {
+    my Perlbal::ClientProxy $self = shift;
+    $self->{low_priority} = 1;
+    return;
+}
+
+sub set_queue_high {
+    my Perlbal::ClientProxy $self = shift;
+    $self->{high_priority} = 1;
+    return;
+}
+
 
 sub DESTROY {
     Perlbal::objdtor($_[0]);
