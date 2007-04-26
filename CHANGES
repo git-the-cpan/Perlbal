@@ -1,3 +1,14 @@
+1.57: 2007-04-26
+
+    -- make ClientHTTP (webserver mode) support transfer-encoding
+       "chunked" PUTs, when PUTs are already enabled.  useful
+       for things like MogileFS, where writing clients may not
+       know the final length ahead of time to predeclare in the
+       Content-Length request header.
+
+    -- Add the client_ip to the X-Forwarded-For header when the
+       upstream is "trusted" (Ask Bjoern Hansen).
+
 1.56: 2007-04-16
 
     -- make HTML proper in ClientManage interface Jacques Marneweck
@@ -16,7 +27,6 @@
        stdin/stdout.  Unfinished.  To be polished in future.
 
     -- new hook "make_low_priority", like "make_high_priority"
-
 
 1.55: 2007-03-21
 
