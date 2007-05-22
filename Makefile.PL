@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
 #   Perl Makefile for Perlbal
-#   $Id: Makefile.PL 554 2006-09-03 09:18:05Z hachi $
+#   $Id: Makefile.PL 674 2007-05-15 19:49:29Z bradfitz $
 #
 #   Invoke with 'perl Makefile.PL'
 #
@@ -32,13 +32,7 @@ WriteMakefile(
         'Test::More'    => 0,
         'File::Find'    => 0,
         'Time::HiRes'   => 0,
-    },
-    dist                    => {
-        CI                      => "cvs commit",
-        RCS_LABEL               => 'cvs tag RELEASE_$(VERSION_SYM)',
-        SUFFIX                  => ".gz",
-        DIST_DEFAULT            => 'all tardist',
-        COMPRESS                => "gzip",
+        #'IO::AIO'  => 1.6,     # recommened.
     },
 
     (

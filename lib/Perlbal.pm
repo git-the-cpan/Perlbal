@@ -33,7 +33,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.58';
+$VERSION = '1.59';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -394,7 +394,7 @@ sub MANAGE_shutdown {
     my $sf = Perlbal::Socket->get_sock_ref;
     foreach my $k (keys %$sf) {
         my Perlbal::Socket $v = $sf->{$k};
-        $v->die_gracefully;
+        $v->die_gracefully if $v->can("die_gracefully");
     }
 
     # register a post loop callback that will end the event loop when we only have
@@ -870,7 +870,7 @@ sub MANAGE_server {
 
     if ($key eq "aio_mode") {
         return $mc->err("Unknown AIO mode") unless $val =~ /^none|linux|ioaio$/;
-        return $mc->err("Linux::AIO not available") if $val eq "linux" && ! $Perlbal::OPTMOD_LINUX_AIO;
+        return $mc->err("Linux::AIO no longer supported") if $val eq "linux";
         return $mc->err("IO::AIO not available")    if $val eq "ioaio" && ! $Perlbal::OPTMOD_IO_AIO;
         $Perlbal::AIO_MODE = $val;
         return $mc->ok;
@@ -878,8 +878,6 @@ sub MANAGE_server {
 
     if ($key eq "aio_threads") {
         return $mc->err("Expected numeric parameter") unless $val =~ /^-?\d+$/;
-        Linux::AIO::min_parallel($val)
-            if $Perlbal::OPTMOD_LINUX_AIO;
         IO::AIO::min_parallel($val)
             if $Perlbal::OPTMOD_IO_AIO;
         return $mc->ok;
@@ -1108,9 +1106,7 @@ sub daemonize {
     # note that we're not in the foreground (for logging purposes)
     $foreground = 0;
 
-    # required before fork: (as of Linux::AIO 1.1, but may change)
-    Linux::AIO::max_parallel(0)
-        if $Perlbal::OPTMOD_LINUX_AIO;
+    # required before fork: (as of old Linux::AIO 1.1, still true?)
     IO::AIO::max_parallel(0)
         if $Perlbal::OPTMOD_IO_AIO;
 
@@ -1149,15 +1145,10 @@ sub run {
 
     # number of AIO threads.  the number of outstanding requests isn't
     # affected by this
-    Linux::AIO::min_parallel(3) if $Perlbal::OPTMOD_LINUX_AIO;
     IO::AIO::min_parallel(3)    if $Perlbal::OPTMOD_IO_AIO;
 
-    # register Linux::AIO's pipe which gets written to from threads
+    # register IO::AIO pipe which gets written to from threads
     # doing blocking IO
-    if ($Perlbal::OPTMOD_LINUX_AIO) {
-        Perlbal::Socket->AddOtherFds(Linux::AIO::poll_fileno() =>
-                                     \&Linux::AIO::poll_cb)
-    }
     if ($Perlbal::OPTMOD_IO_AIO) {
         Perlbal::Socket->AddOtherFds(IO::AIO::poll_fileno() =>
                                      \&IO::AIO::poll_cb);
