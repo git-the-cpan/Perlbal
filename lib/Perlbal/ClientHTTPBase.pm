@@ -7,8 +7,8 @@
 # both paths can then go into persist_wait, which means they're waiting
 # for another request from the user
 #
-# Copyright 2004, Danga Interactice, Inc.
-# Copyright 2005-2006, Six Apart, Ltd.
+# Copyright 2004, Danga Interactive, Inc.
+# Copyright 2005-2007, Six Apart, Ltd.
 
 package Perlbal::ClientHTTPBase;
 use strict;
@@ -42,8 +42,7 @@ use Fcntl ':mode';
 use Errno qw( EPIPE ECONNRESET );
 use POSIX ();
 
-# ghetto hard-coding.  should let siteadmin define or something.
-# maybe console/config command:  AddMime <ext> <mime-type>  (apache-style?)
+# hard-code defaults can be changed with MIME management command
 our $MimeType = {qw(
                     css  text/css
                     doc  application/msword
@@ -54,6 +53,7 @@ our $MimeType = {qw(
                     js   application/x-javascript
                     mp3  audio/mpeg
                     mpg  video/mpeg
+                    pdf  application/pdf
                     png  image/png
                     tif   image/tiff
                     tiff  image/tiff
@@ -124,7 +124,7 @@ sub setup_keepalive {
     my $do_keepalive = $persist_client && $rqhd->req_keep_alive($reshd);
     if ($do_keepalive) {
         print "  doing keep-alive to client\n" if Perlbal::DEBUG >= 3;
-        my $timeout = $self->max_idle_time;
+        my $timeout = $self->{service}->{persist_client_timeout};
         $reshd->header('Connection', 'keep-alive');
         $reshd->header('Keep-Alive', $timeout ? "timeout=$timeout, max=100" : undef);
     } else {
@@ -136,6 +136,11 @@ sub setup_keepalive {
         $reshd->header('Connection', 'close');
         $reshd->header('Keep-Alive', undef);
     }
+}
+
+# overridden here from Perlbal::Socket to use the service value
+sub max_idle_time {
+    return $_[0]->{service}->{persist_client_timeout};
 }
 
 # called when we've finished writing everything to a client and we need
@@ -189,7 +194,9 @@ sub http_response_sent {
     $self->state('persist_wait');
 
     if (my $selector_svc = $self->{selector_svc}) {
-        $selector_svc->return_to_base($self);
+        if (! $selector_svc->run_hook('return_to_base', $self)){
+            $selector_svc->return_to_base($self);
+        }
     }
 
     # NOTE: because we only speak 1.0 to clients they can't have
@@ -763,9 +770,6 @@ sub system_error {
     # and return a 500
     return $self->send_response(500, $msg);
 }
-
-# FIXME: let this be configurable?
-sub max_idle_time { 30; }
 
 sub event_err {  my $self = shift; $self->close('error'); }
 sub event_hup {  my $self = shift; $self->close('hup'); }

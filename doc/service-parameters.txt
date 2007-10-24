@@ -30,6 +30,10 @@ For all services:
    | persist_client  | bool | false                 | HTTP keep-alives to   |
    |                 |      |                       | the end user.         |
    |-----------------+------+-----------------------+-----------------------|
+   |                 |      |                       | Timeout in secs for   |
+   | persist_client_ | int  | 30                    | HTTP keep-alives to   |
+   | timeout         |      |                       | the end user.         |
+   |-----------------+------+-----------------------+-----------------------|
    |                 |      |                       | What type of service. |
    |                 |      |                       | One of                |
    |                 |      |                       | 'reverse_proxy' for a |

@@ -4,9 +4,6 @@
 * perlbal idea: X-Pick-Backend header (fwd)
   http://rt.livejournal.org/Ticket/Display.html?id=326
 
-* stats plugin leaks memory
-  http://rt.livejournal.org/Ticket/Display.html?id=341
-
 * Perlbal rate limiting patch (fwd)
   http://rt.livejournal.org/Ticket/Display.html?id=342
 
@@ -21,9 +18,6 @@
 
 * window sizes, so_recvbuf
   http://rt.livejournal.org/Ticket/Display.html?id=1225
-
-* can't insert headers on selector pool in perlbal
-  http://rt.livejournal.org/Ticket/Display.html?id=1250
 
 * perlbal memory leaks --- need to add watches
   http://rt.livejournal.org/Ticket/Display.html?id=1693
@@ -96,4 +90,31 @@
 
 * provide a way to introspect the low queue in perlbal
   http://rt.livejournal.org/Ticket/Display.html?id=3880
+
+* cacheable header perlbal plugin
+  http://rt.livejournal.org/Ticket/Display.html?id=4045
+
+* content caching perlbal plugin
+  http://rt.livejournal.org/Ticket/Display.html?id=4046
+
+* IP scoring to assist throttling IPs
+  http://rt.livejournal.org/Ticket/Display.html?id=4047
+
+* header counting and display perlbal plugin
+  http://rt.livejournal.org/Ticket/Display.html?id=4048
+
+* max conns to backend limit
+  http://rt.livejournal.org/Ticket/Display.html?id=4052
+
+* make AccessControl plugin efficient with tons of rules
+  http://rt.livejournal.org/Ticket/Display.html?id=4134
+
+* perlbal: fix Undef client_ip errors
+  http://rt.livejournal.org/Ticket/Display.html?id=4345
+
+* perlbal: fix "Use of uninitialized value in (split|bitwise|string)"
+  http://rt.livejournal.org/Ticket/Display.html?id=4346
+
+* Perlbal closes connection on some AJAX requests
+  http://rt.livejournal.org/Ticket/Display.html?id=4429
 

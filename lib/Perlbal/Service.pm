@@ -2,8 +2,8 @@
 # Service class
 ######################################################################
 #
-# Copyright 2004, Danga Interactice, Inc.
-# Copyright 2005-2006, Six Apart, Ltd.
+# Copyright 2004, Danga Interactive, Inc.
+# Copyright 2005-2007, Six Apart, Ltd.
 #
 
 package Perlbal::Service;
@@ -54,6 +54,7 @@ use fields (
             'reproxy_cache_maxsize', # int; maximum number of reproxy results to be cached. (0 is disabled and default)
             'client_sndbuf_size',    # int: bytes for SO_SNDBUF
             'server_process' ,       # scalar: path to server process (executable)
+            'persist_client_timeout',  # int: keep-alive timeout in seconds for clients (default is 30)
 
             # Internal state:
             'waiting_clients',         # arrayref of clients waiting for backendhttp conns
@@ -76,6 +77,7 @@ use fields (
             'backend_no_spawn', # { "ip:port" => 1 }; if on, spawn_backends will ignore this ip:port combo
             'buffer_backend_connect', # 0 for of, else, number of bytes to buffer before we ask for a backend
             'selector',    # CODE ref, or undef, for role 'selector' services
+            'default_service', # Perlbal::Service; name of a service a selector should default to
             'buffer_uploads', # bool; enable/disable the buffered uploads to disk system
             'buffer_uploads_path', # string; path to store buffered upload files
             'buffer_upload_threshold_time', # int; buffer uploads estimated to take longer than this
@@ -379,6 +381,27 @@ our $tunables = {
         },
     },
 
+    'default_service' => {
+        des => "Name of previously-created service to default requests that aren't matched by a selector plugin to.",
+        check_role => "selector",
+        check_type => sub {
+            my ($self, $val, $errref) = @_;
+
+            my $svc = Perlbal->service($val);
+            unless ($svc) {
+                $$errref = "Service '$svc' not found";
+                return 0;
+            }
+
+            $self->{default_service} = $svc;
+            return 1;
+        }, 
+        setter => sub {
+            # override default so we don't set it to the text
+            return $_[3]->ok;
+        },
+    },
+
     'pool' => {
         des => "Name of previously-created pool object containing the backend nodes that this reverse proxy sends requests to.",
         check_role => "reverse_proxy",
@@ -416,6 +439,13 @@ our $tunables = {
         },
     },
 
+    'persist_client_timeout' => {
+        des => "Timeout in seconds for HTTP keep-alives to the end user (default is 30)",
+        check_type => "int",
+        default => 30,
+        check_role => "*",
+    },
+    
     'buffer_uploads_path' => {
         des => "Directory root for storing files used to buffer uploads.",
 
@@ -1259,6 +1289,7 @@ sub header_management {
     my ($mode, $key, $val, $mc) = @_;
     return $mc->err("no header provided") unless $key;
     return $mc->err("no value provided")  unless $val || $mode eq 'remove';
+    return $mc->err("only valid on reverse_proxy services") unless $self->{role} eq 'reverse_proxy';
 
     if ($mode eq 'insert') {
         push @{$self->{extra_headers}->{insert}}, [ $key, $val ];
@@ -1286,7 +1317,23 @@ sub munge_headers {
 # getter/setter
 sub selector {
     my Perlbal::Service $self = shift;
-    $self->{selector} = shift if @_;
+    if (@_) {
+        my $ref = shift;
+        $self->{selector} = sub {
+            my $cb = shift;
+
+            # try to give it to our defined selector
+            my $res = $ref->($cb);
+
+            # if that failed and we have a default, then give it to them
+            if (!$res && $self->{default_service}) {
+                $self->{default_service}->adopt_base_client($cb);
+                return 1;
+            }
+
+            return $res;
+        };
+    }
     return $self->{selector};
 }
 

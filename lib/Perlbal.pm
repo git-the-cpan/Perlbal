@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
-# Copyright 2004, Danga Interactice, Inc.
-# Copyright 2005-2006, Six Apart, Ltd.
+# Copyright 2004, Danga Interactive, Inc.
+# Copyright 2005-2007, Six Apart, Ltd.
 #
 
 =head1 NAME
@@ -14,8 +14,8 @@ Perlbal - Reverse-proxy load balancer and webserver
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright 2004, Danga Interactice, Inc.
-Copyright 2005-2006, Six Apart, Ltd.
+Copyright 2004, Danga Interactive, Inc.
+Copyright 2005-2007, Six Apart, Ltd.
 
 You can use and redistribute Perlbal under the same terms as Perl itself.
 
@@ -33,7 +33,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.59';
+$VERSION = '1.60';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -94,6 +94,10 @@ our $foreground = 1; # default to foreground
 our $track_obj = 0;  # default to not track creation locations
 our $reqs = 0; # total number of requests we've done
 our $starttime = time(); # time we started
+our $pidfile = '';  # full path, default to not writing pidfile
+# used by pidfile (only makes sense before run started)
+# don't rely on this variable, it might change.
+our $run_started = 0;  
 our ($lastutime, $laststime, $lastreqs) = (0, 0, 0); # for deltas
 
 our %PluginCase = ();   # lowercase plugin name -> as file is named
@@ -380,7 +384,7 @@ sub MANAGE_verbose {
 }
 
 sub MANAGE_shutdown {
-    my $mc = shift->parse(qr/^shutdown( graceful)?$/);
+    my $mc = shift->parse(qr/^shutdown(\s?graceful)?\s?(\d+)?$/);
 
     # immediate shutdown
     exit(0) unless $mc->arg(1);
@@ -414,8 +418,40 @@ sub MANAGE_shutdown {
         return 0; # end the event loop and thus we exit perlbal
     });
 
+    # If requested, register a callback to kill the perlbal process after a specified number of seconds
+    if (my $timeout = $mc->arg(2)) {
+        Perlbal::Socket::register_callback($timeout, sub { exit(0); });
+    }
+
     # so they know something happened
     return $mc->ok;
+}
+
+sub MANAGE_mime {
+    my $mc = shift->parse(qr/^mime(?:\s+(\w+)(?:\s+(\w+))?(?:\s+(\S+))?)?$/);
+    my ($cmd, $arg1, $arg2) = ($mc->arg(1), $mc->arg(2), $mc->arg(3));
+
+    if (!$cmd || $cmd eq 'list') {
+        foreach my $key (sort keys %$Perlbal::ClientHTTPBase::MimeType) {
+            $mc->out("$key $Perlbal::ClientHTTPBase::MimeType->{$key}");
+        }
+        $mc->end;
+    } elsif ($cmd eq 'set') {
+        if (!$arg1 || !$arg2) {
+            return $mc->err("Usage: set <ext> <mime>");
+        }
+
+        $Perlbal::ClientHTTPBase::MimeType->{$arg1} = $arg2;
+        return $mc->out("$arg1 set to $arg2.");
+    } elsif ($cmd eq 'remove') {
+        if (delete $Perlbal::ClientHTTPBase::MimeType->{$arg1}) {
+            return $mc->out("$arg1 removed.");
+        } else {
+            return $mc->err("$arg1 not a defined extension.");
+        }
+    } else {
+        return $mc->err("Usage: list, remove <ext>, add <ext> <mime>");
+    }
 }
 
 sub MANAGE_xs {
@@ -734,17 +770,20 @@ sub MANAGE_queues {
     foreach my $svc (values %service) {
         next unless $svc->{role} eq 'reverse_proxy';
 
-        my ($age, $count) = (0, scalar(@{$svc->{waiting_clients}}));
-        my Perlbal::ClientProxy $oldest = $svc->{waiting_clients}->[0];
-        $age = $now - $oldest->{last_request_time} if defined $oldest;
-        $mc->out("$svc->{name}-normal.age $age");
-        $mc->out("$svc->{name}-normal.count $count");
+        my %queues = (
+            normal  => 'waiting_clients',
+            highpri => 'waiting_clients_highpri',
+            lowpri  => 'waiting_clients_lowpri',
+        );
 
-        ($age, $count) = (0, scalar(@{$svc->{waiting_clients_highpri}}));
-        $oldest = $svc->{waiting_clients_highpri}->[0];
-        $age = $now - $oldest->{last_request_time} if defined $oldest;
-        $mc->out("$svc->{name}-highpri.age $age");
-        $mc->out("$svc->{name}-highpri.count $count");
+        while (my ($queue_name, $clients_key) = each %queues) {
+            my $age = 0;
+            my $count = @{$svc->{$clients_key}};
+            my Perlbal::ClientProxy $oldest = $svc->{$clients_key}->[0];
+            $age = $now - $oldest->{last_request_time} if defined $oldest;
+            $mc->out("$svc->{name}-$queue_name.age $age");
+            $mc->out("$svc->{name}-$queue_name.count $count");
+        }
     }
     $mc->end;
 }
@@ -766,7 +805,7 @@ sub MANAGE_state {
 sub MANAGE_leaks {
     my $mc = shift->parse(qr/^leaks(?:\s+(.+))?$/);
     return $mc->err("command disabled without \$ENV{PERLBAL_DEBUG} set")
-        unless $ENV{PERBAL_DEBUG};
+        unless $ENV{PERLBAL_DEBUG};
 
     my $what = $mc->arg(1);
 
@@ -887,6 +926,13 @@ sub MANAGE_server {
         return $mc->err("Expected 1 or 0") unless $val eq '1' || $val eq '0';
         $track_obj = $val + 0;
         %ObjTrack = () if $val; # if we're turning it on, clear it out
+        return $mc->ok;
+    }
+
+    if ($key eq "pidfile") {
+        return $mc->err("pidfile must be configured at startup, before Perlbal::run is called") if  $run_started;
+        return $mc->err("Expected full pathname to pidfile") unless $val;
+        $pidfile = $val;
         return $mc->ok;
     }
 
@@ -1139,9 +1185,13 @@ sub daemonize {
 }
 
 sub run {
+    $run_started = 1;
+
     # setup for logging
     Sys::Syslog::openlog('perlbal', 'pid', 'daemon') if $Perlbal::SYSLOG_AVAILABLE;
     Perlbal::log('info', 'beginning run');
+    my $pidfile_written = 0;
+    $pidfile_written = _write_pidfile( $pidfile ) if $pidfile;
 
     # number of AIO threads.  the number of outstanding requests isn't
     # affected by this
@@ -1178,6 +1228,12 @@ sub run {
         Perlbal::log('crit', "crash log: $_") foreach split(/\r?\n/, $@);
         $clean_exit = 0;
     }
+
+    # Note: This will only actually remove the pidfile on 'shutdown graceful'
+    # A more reliable approach might be to have a pidfile object which fires
+    # removal on DESTROY.
+    _remove_pidfile( $pidfile ) if $pidfile_written;
+
     Perlbal::log('info', 'ending run');
     Sys::Syslog::closelog() if $Perlbal::SYSLOG_AVAILABLE;
 
@@ -1195,6 +1251,32 @@ sub log {
         Sys::Syslog::syslog(@_) if $Perlbal::SYSLOG_AVAILABLE;
     }
 }
+
+
+sub _write_pidfile {
+    my $file = shift;
+
+    my $fh;
+    unless (open($fh, ">$file")) {
+        Perlbal::log('info', "couldn't create pidfile '$file': $!" );
+        return 0;
+    }
+    unless ((print $fh "$$\n") && close($fh)) {
+        Perlbal::log('info', "couldn't write into pidfile '$file': $!" );
+        _remove_pidfile($file);
+        return 0;
+    }
+    return 1;
+}
+
+
+sub _remove_pidfile {
+    my $file = shift;
+    
+    unlink $file;
+    return 1;
+}
+
 
 # Local Variables:
 # mode: perl
