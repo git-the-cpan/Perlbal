@@ -55,6 +55,8 @@ For all services:
    |-----------------+------+-----------------------+-----------------------|
    | ssl_cert_file   |      | certs/server-cert.pem | Path to certificate   |
    |                 |      |                       | PEM file for SSL.     |
+   |                 |      |                       | Include any needed    |
+   |                 |      |                       | chain PEMs here, too. | 
    |-----------------+------+-----------------------+-----------------------|
    | ssl_cipher_list |      | ALL:!LOW:!EXP         | OpenSSL-style cipher  |
    |                 |      |                       | list.                 |
@@ -286,6 +288,9 @@ Only for 'reverse_proxy' services:
 |                             |    |                   |yet. Using this option     |
 |                             |    |                   |reduces end-user latency a |
 |                             |    |                   |ton on loaded sites.       |
+|-----------------------------+----+-------------------+---------------------------|
+|verify_backend_path          |    |*                  |Path in the OPTIONS request|
+|                             |    |                   |sent by verify_backend.    |
 +----------------------------------------------------------------------------------+
 
 Only for 'web_server' services:

@@ -10,6 +10,8 @@ use strict;
 use warnings;
 no  warnings qw(deprecated);
 
+use Perlbal;
+
 use fields (
             'headers',   # href; lowercase header -> comma-sep list of values
             'origcase',  # href; lowercase header -> provided case
@@ -220,6 +222,25 @@ sub request_method {
 sub request_uri {
     my Perlbal::HTTPHeaders $self = shift;
     return $self->{uri};
+}
+
+sub set_request_uri {
+    my Perlbal::HTTPHeaders $self = shift;
+    return unless $self->{requestLine};
+
+    my $uri = shift;
+
+    return unless defined $uri and length $uri;
+
+    my $ver = $self->{ver};
+
+    if ($ver == 0.9) {
+        $self->{requestLine} = sprintf("%s %s", $self->{method}, $uri);
+    } else {
+        $self->{requestLine} = sprintf("%s %s HTTP/%s", $self->{method}, $uri, $ver);
+    }
+
+    return $self->{uri} = $uri;
 }
 
 sub version_number {

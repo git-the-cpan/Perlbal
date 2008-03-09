@@ -1,3 +1,63 @@
+1.70: 2008-03-08
+
+    -- SECURITY: patch from Jeremey James <jbj@forbidden.co.uk> to not crash
+       on zero byte chunked upload when buffered uploads are enabled.
+
+    -- on successful write, update Perlbal::Socket's alive_time, so slowly
+       reproxied writes don't timeout the connection and kill it.  Patch
+       from Jonty <jonty@last.fm>.  r765
+
+    -- Perl 5.10 support.  Patch from Andy Armstrong <andy@hexten.net>.
+       Disclaimer: at least the tests all pass now, but no real-world use yet.
+       Should be fine, though.  Please report your success to the mailing list
+       and/or brad@danga.com.
+
+    -- Add Include plugin by Eamon Daly <edaly@nextwavemedia.com>; plugin
+       allows you to use "INCLUDE = /etc/conf.d/*" or "INCLUDE = /foo.conf"
+       to bring in more config; can be nested.
+
+    -- SECURITY: Previously a single upward directory traversal was possible
+       when concat get was enabled. This behavior has been fixed in code to
+       match with standard file serving.
+
+    -- Fix 'No such pseudo-hash field "high_priority"' issue in Stats plugin
+       (Eamon Daly and Jonty Wareing)
+
+    -- Support for "anonymous services", for API callers that really don't
+       care what their service is called but just want to get hold of a
+       Service object. These aren't really anonymous, but they have suitably
+       ugly names that no sane human should ever conflict with them.
+
+    -- add some new methods that make it a little nicer to embed Perlbal
+       in another application that uses Danga::Socket. Some refactoring
+       was done to avoid duplicate code between the "end-user" way and the
+       API way.
+
+    -- Chained selectors.  from Jeremy James <jbj@forbidden.co.uk>.
+
+    -- add "cgilike" plugin which offers a simple API very loosely based on
+       mod_perl for handling responses
+
+    -- add HTTPHeaders method set_request_uri so plugins can modify the uri
+       being requested
+
+    -- access control test
+
+    -- add option to AccessControl plugin to use observed_ip_string instead
+
+    -- add observed_ip_string method to perlbal sockets, allowing http
+       connections to set an observed ip string when an upstream proxy is
+       trusted.
+
+    -- add blind_proxy option, which disables appending to the end of the
+       X-Forwarded-For header when connections arrive from a trusted proxy.
+
+    -- make socket closing more verbose when Perlbal::DEBUG is set
+
+    -- verify_backend_path configuration option
+
+    -- don't overwrite $^P, allows use of perl debugger on perlbal.
+
 1.60: 2007-10-23
 
     -- accept LFLF to end HTTP request headers, instead of just

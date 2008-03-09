@@ -62,7 +62,7 @@ sub filecontent {
 sub foreach_aio (&) {
     my $cb = shift;
 
-    foreach my $mode (qw(none linux ioaio)) {
+    foreach my $mode (qw(none ioaio)) {
         my $line = manage("SERVER aio_mode = $mode");
         next unless $line;
         $cb->($mode);
@@ -71,9 +71,20 @@ sub foreach_aio (&) {
 
 sub manage {
     my $cmd = shift;
+    my %opts = @_;
+
     print $msock "$cmd\r\n";
     my $res = <$msock>;
-    return 0 if !$res || $res =~ /^ERR/;
+
+    if (!$res || $res =~ /^ERR/) {
+        # Make the result visible in failure cases, unless
+        # the command was 'shutdown'... cause that never
+        # returns anything.
+        warn "Manage command failed: '$cmd' '$res'\n"
+            unless($opts{quiet_failure} || $cmd eq 'shutdown');
+
+        return 0;
+    }
     return $res;
 }
 

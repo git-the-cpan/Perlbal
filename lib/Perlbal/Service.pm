@@ -13,6 +13,7 @@ no  warnings qw(deprecated);
 
 use Perlbal::BackendHTTP;
 use Perlbal::Cache;
+use Perlbal::Util;
 
 use fields (
             'name',            # scalar: name of this service
@@ -40,6 +41,7 @@ use fields (
             'persist_client',  # bool: persistent connections for clients
             'persist_backend', # bool: persistent connections for backends
             'verify_backend',  # bool: get attention of backend before giving it clients (using OPTIONS)
+            'verify_backend_path', # path to check with the OPTIONS request (default *)
             'max_backend_uses',  # max requests to send per kept-alive backend (default 0 = unlimited)
             'connect_ahead',           # scalar: number of spare backends to connect to in advance all the time
             'buffer_size', # int: specifies how much data a ClientProxy object should buffer from a backend
@@ -50,6 +52,7 @@ use fields (
                                    # request when we're in pressure relief mode
             'trusted_upstream_proxies', # Net::Netmask object containing netmasks for trusted upstreams
             'always_trusted', # bool; if true, always trust upstreams
+            'blind_proxy', # bool: if true, do not modify X-Forwarded-For, X-Host, or X-Forwarded-Host headers
             'enable_reproxy', # bool; if true, advertise that server will reproxy files and/or URLs
             'reproxy_cache_maxsize', # int; maximum number of reproxy results to be cached. (0 is disabled and default)
             'client_sndbuf_size',    # int: bytes for SO_SNDBUF
@@ -170,6 +173,12 @@ our $tunables = {
         des => "Whether Perlbal should send a quick OPTIONS request to the backends before sending an actual client request to them.  If your backend is Apache or some other process-based webserver, this is HIGHLY recommended.  All too often a loaded backend box will reply to new TCP connections, but it's the kernel's TCP stack Perlbal is talking to, not an actual Apache process yet.  Using this option reduces end-user latency a ton on loaded sites.",
         default => 0,
         check_type => "bool",
+        check_role => "reverse_proxy",
+    },
+    
+    'verify_backend_path' => {
+        des => "What path the OPTIONS request sent by verify_backend should use.  Default is '*'.",
+        default => '*',
         check_role => "reverse_proxy",
     },
 
@@ -340,6 +349,13 @@ our $tunables = {
         des => "Whether to trust all incoming requests' X-Forwarded-For and related headers.  Set to true only if you know that all incoming requests from your own proxy servers that clean/set those headers.",
         default => 0,
         check_type => "bool",
+        check_role => "*",
+    },
+
+    'blind_proxy' => {
+        des => "Flag to disable any modification of X-Forwarded-For, X-Host, and X-Forwarded-Host headers.",
+        default => 0,
+        check_type => "bool",
         check_role => "reverse_proxy",
     },
 
@@ -355,7 +371,7 @@ our $tunables = {
 
     'trusted_upstream_proxies' => {
         des => "A Net::Netmask filter (e.g. 10.0.0.0/24, see Net::Netmask) that determines whether upstream clients are trusted or not, where trusted means their X-Forwarded-For/etc headers are not munged.",
-        check_role => "reverse_proxy",
+        check_role => "*",
         check_type => sub {
             my ($self, $val, $errref) = @_;
             unless (my $loaded = eval { require Net::Netmask; 1; }) {
@@ -367,7 +383,12 @@ our $tunables = {
             $$errref = "Error defining trusted upstream proxies: " . Net::Netmask::errstr();
             return 0;
         },
-
+        setter => sub {
+            my ($self, $val, $set, $mc) = @_;
+	    # Do nothing here, we don't want the default setter because we've
+	    # already set the value in the type_check step.
+            return $mc->ok;
+	},
     },
 
     'index_files' => {
@@ -594,6 +615,27 @@ sub new {
     }
 
     return $self;
+}
+
+# handy instance method to run some manage commands in the context of this service,
+# without needing to worry about its name.
+# This is intended as an internal API thing, so any output that would have been
+# generated is just eaten.
+sub run_manage_commands {
+    my ($self, $cmd_block) = @_;
+
+    my $ctx = Perlbal::CommandContext->new;
+    $ctx->{last_created} = $self->name;
+    return Perlbal::run_manage_commands($cmd_block, undef, $ctx);
+}
+
+# here's an alternative version of the above that runs a single command
+sub run_manage_command {
+    my ($self, $cmd) = @_;
+
+    my $ctx = Perlbal::CommandContext->new;
+    $ctx->{last_created} = $self->name;
+    return Perlbal::run_manage_command($cmd, undef, $ctx);
 }
 
 # called once a role has been set
@@ -1350,6 +1392,9 @@ sub adopt_base_client {
     } elsif ($self->{'role'} eq "reverse_proxy") {
         Perlbal::ClientProxy->new_from_base($cb);
         return;
+    } elsif ($self->{'role'} eq "selector") {
+        $self->selector()->($cb);
+        return;
     } else {
         $cb->_simple_response(500, "Can't map to service type $self->{'role'}");
     }
@@ -1362,7 +1407,7 @@ sub return_to_base {
     my Perlbal::ClientHTTPBase $cb = shift;  # actually a subclass of Perlbal::ClientHTTPBase
 
     $cb->{service} = $self;
-    bless $cb, "Perlbal::ClientHTTPBase";
+    Perlbal::Util::rebless($cb, "Perlbal::ClientHTTPBase");
 
     # the read/watch events are reset by ClientHTTPBase's http_response_sent (our caller)
 }

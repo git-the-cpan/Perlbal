@@ -61,7 +61,8 @@ our %NodeStats; # { "ip:port" => { ... } }; keep statistics about nodes
 # an options hashref that contains some options:
 #       reportto => object obeying reportto interface
 sub new {
-    my ($class, $svc, $ip, $port, $opts) = @_;
+    my Perlbal::BackendHTTP $self = shift;
+    my ($svc, $ip, $port, $opts) = @_;
     $opts ||= {};
 
     my $sock;
@@ -71,11 +72,16 @@ sub new {
         Perlbal::log('crit', "Error creating socket: $!");
         return undef;
     }
+    my $inet_aton = Socket::inet_aton($ip);
+    unless ($inet_aton) {
+        Perlbal::log('crit', "inet_aton failed creating socket for $ip");
+        return undef;
+    }
 
     IO::Handle::blocking($sock, 0);
-    connect $sock, Socket::sockaddr_in($port, Socket::inet_aton($ip));
+    connect $sock, Socket::sockaddr_in($port, $inet_aton);
 
-    my $self = fields::new($class);
+    $self = fields::new($self) unless ref $self;
     $self->SUPER::new($sock);
 
     Perlbal::objctor($self);
@@ -104,7 +110,6 @@ sub new {
     # for header reading:
     $self->init;
 
-    bless $self, ref $class || $class;
     $self->watch_write(1);
     return $self;
 }
@@ -166,7 +171,6 @@ sub new_process {
     $self->state("connecting");
 
     $self->init;
-    bless $self, ref $class || $class;
     $self->watch_write(1);
     return $self;
 }
@@ -264,9 +268,12 @@ sub assign_client {
     # forwarding info headers
     if ($svc->trusted_ip($client_ip)) {
         # yes, we trust our upstream, so just append our client's IP
-        # to the existing list of forwarded IPs
-        my @ips = split /,\s*/, ($hds->header("X-Forwarded-For") || '');
-        $hds->header("X-Forwarded-For", join ", ", @ips, $client_ip);
+        # to the existing list of forwarded IPs, if we're a blind proxy
+        # then don't append our IP to the end of the list.
+        unless ($svc->{blind_proxy}) {
+            my @ips = split /,\s*/, ($hds->header("X-Forwarded-For") || '');
+            $hds->header("X-Forwarded-For", join ", ", @ips, $client_ip);
+        }
     } else {
         # no, don't trust upstream (untrusted client), so remove all their
         # forwarding headers and tag their IP as the x-forwarded-for
@@ -343,7 +350,7 @@ sub event_write {
             !$self->{has_attention} && !defined $NoVerify{$self->{ipport}}) {
 
             # the backend should be able to answer this incredibly quickly.
-            $self->write("OPTIONS * HTTP/1.0\r\nConnection: keep-alive\r\n\r\n");
+            $self->write("OPTIONS " . $self->{service}->{verify_backend_path} . " HTTP/1.0\r\nConnection: keep-alive\r\n\r\n");
             $self->watch_read(1);
             $self->{waiting_options} = 1;
             $self->{content_length_remain} = undef;

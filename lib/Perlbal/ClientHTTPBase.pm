@@ -39,7 +39,7 @@ use fields ('service',             # Perlbal::Service object
             );
 
 use Fcntl ':mode';
-use Errno qw( EPIPE ECONNRESET );
+use Errno qw(EPIPE ECONNRESET);
 use POSIX ();
 
 # hard-code defaults can be changed with MIME management command
@@ -64,10 +64,10 @@ our $MimeType = {qw(
 
 # ClientHTTPBase
 sub new {
-    my ($class, $service, $sock, $selector_svc) = @_;
 
-    my $self = $class;
-    $self = fields::new($class) unless ref $self;
+    my Perlbal::ClientHTTPBase $self = shift;
+    my ($service, $sock, $selector_svc) = @_;
+    $self = fields::new($self) unless ref $self;
     $self->SUPER::new($sock);       # init base fields
 
     $self->{service}         = $service;
@@ -79,7 +79,6 @@ sub new {
 
     $self->state('reading_headers');
 
-    bless $self, ref $class || $class;
     $self->watch_read(1);
     return $self;
 }
@@ -228,6 +227,8 @@ sub reproxy_fh {
 
 sub event_read {
     my Perlbal::ClientHTTPBase $self = shift;
+
+    $self->{alive_time} = $Perlbal::tick_time;
 
     # see if we have headers?
     die "Shouldn't get here!  This is an abstract base class, pretty much, except in the case of the 'selector' role."
@@ -539,6 +540,7 @@ sub _serve_request_multiple {
 
     return $self->_simple_response(403, "Multiple file serving isn't enabled") unless $svc->{enable_concatenate_get};
     return $self->_simple_response(403, "Too many files requested") if @multiple_files > 100;
+    return $self->_simple_response(403, "Bogus filenames") if grep { m!(?:\A|/)\.\./! } @multiple_files;
 
     my $remain = @multiple_files + 1;  # 1 for the base directory
     my $dirbase = $svc->{docroot} . $base;
@@ -657,6 +659,22 @@ sub _serve_request_multiple_poststat {
         });
     };
     $self->{post_sendfile_cb}->();
+}
+
+sub check_req_headers {
+    my Perlbal::ClientHTTPBase $self = shift;
+    my Perlbal::HTTPHeaders $hds = $self->{req_headers};
+
+    if ($self->{service}->trusted_ip($self->peer_ip_string)) {
+        my @ips = split /,\s*/, ($hds->header("X-Forwarded-For") || '');
+
+        # This list may be empty, and that's OK, in that case we should unset the
+        # observed_ip_string, so no matter what we'll use the 0th element, whether
+        # it happens to be an ip string, or undef.
+        $self->observed_ip_string($ips[0]);
+    }
+
+    return;
 }
 
 sub try_index_files {
@@ -780,7 +798,9 @@ sub as_string {
     my $ret = $self->SUPER::as_string;
     my $name = $self->{sock} ? getsockname($self->{sock}) : undef;
     my $lport = $name ? (Socket::sockaddr_in($name))[0] : undef;
+    my $observed = $self->observed_ip_string;
     $ret .= ": localport=$lport" if $lport;
+    $ret .= "; observed_ip=$observed" if defined $observed;
     $ret .= "; reqs=$self->{requests}";
     $ret .= "; $self->{state}";
 

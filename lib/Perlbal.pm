@@ -25,7 +25,7 @@ package Perlbal;
 
 BEGIN {
     # keep track of anonymous subs' origins:
-    $^P = 0x200;
+    $^P |= 0x200;
 }
 
 my $has_gladiator  = eval "use Devel::Gladiator; 1;";
@@ -33,7 +33,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.60';
+$VERSION = '1.70';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -53,6 +53,9 @@ $Perlbal::BSD_RESOURCE_AVAILABLE = eval { require BSD::Resource; 1; };
 
 # incremented every second by a timer:
 $Perlbal::tick_time = time();
+
+# Set to 1 when we open syslog, and 0 when we close it
+$Perlbal::syslog_open = 0;
 
 use Getopt::Long;
 use Carp qw(cluck croak);
@@ -89,6 +92,7 @@ our(%service);   # servicename -> Perlbal::Service
 our(%pool);      # poolname => Perlbal::Pool
 our(%plugins);   # plugin => 1 (shows loaded plugins)
 our($last_error);
+our $service_autonumber = 1; # used to generate names for anonymous services created with Perlbal->create_service()
 our $vivify_pools = 1; # if on, allow automatic creation of pools
 our $foreground = 1; # default to foreground
 our $track_obj = 0;  # default to not track creation locations
@@ -189,6 +193,21 @@ sub service_names {
 sub service {
     my $class = shift;
     return $service{$_[0]};
+}
+
+sub create_service {
+    my $class = shift;
+    my $name = shift;
+    
+    unless (defined($name)) {
+        $name = "____auto_".($service_autonumber++);
+    }
+
+    croak("service '$name' already exists") if $service{$name};
+    croak("pool '$name' already exists") if $pool{$name};
+
+    # Create the new service and return it
+    return $service{$name} = Perlbal::Service->new($name);
 }
 
 sub pool {
@@ -667,7 +686,11 @@ sub MANAGE_socks {
         $mc->out(sprintf("%5s %6s", "fd", "age"));
         foreach (sort { $a <=> $b } keys %$sf) {
             my $sock = $sf->{$_};
-            my $age = $now - $sock->{create_time};
+            my $age;
+            eval {
+                $age = $now - $sock->{create_time};
+            };
+            $age ||= 0;
             $mc->out(sprintf("%5d %5ds %s", $_, $age, $sock->as_string));
         }
     }
@@ -743,6 +766,7 @@ sub MANAGE_states {
 
     my %states; # { "Class" => { "State" => int count; } }
     foreach my $sock (values %$sf) {
+        next unless $sock->can('state');
         my $state = $sock->state;
         next unless defined $state;
         if (defined $svc) {
@@ -953,7 +977,7 @@ sub MANAGE_create {
     if ($what eq "service") {
         return $mc->err("service '$name' already exists") if $service{$name};
         return $mc->err("pool '$name' already exists") if $pool{$name};
-        $service{$name} = Perlbal::Service->new($name);
+        Perlbal->create_service($name);
         $mc->{ctx}{last_created} = $name;
         return $mc->ok;
     }
@@ -1135,14 +1159,14 @@ sub MANAGE_aio {
 
 sub load_config {
     my ($file, $writer) = @_;
-    open (F, $file) or die "Error opening config file ($file): $!\n";
+    open (my $fh, $file) or die "Error opening config file ($file): $!\n";
     my $ctx = Perlbal::CommandContext->new;
     $ctx->verbose(0);
-    while (my $line = <F>) {
+    while (my $line = <$fh>) {
         $line =~ s/\$(\w+)/$ENV{$1}/g;
         return 0 unless run_manage_command($line, $writer, $ctx);
     }
-    close(F);
+    close($fh);
     return 1;
 }
 
@@ -1184,26 +1208,44 @@ sub daemonize {
     open(STDERR, "+>&STDIN");
 }
 
+# For other apps using Danga::Socket that want to embed Perlbal, this can be called
+# directly to start it up. You can call this as many times as you like; it'll
+# only actually do what it does the first time it's called.
+sub initialize {
+    unless ($run_started) {
+        $run_started = 1;
+
+        # number of AIO threads.  the number of outstanding requests isn't
+        # affected by this
+        IO::AIO::min_parallel(3)    if $Perlbal::OPTMOD_IO_AIO;
+
+        # register IO::AIO pipe which gets written to from threads
+        # doing blocking IO
+        if ($Perlbal::OPTMOD_IO_AIO) {
+            Perlbal::Socket->AddOtherFds(IO::AIO::poll_fileno() =>
+                                         \&IO::AIO::poll_cb);
+        }
+
+        # The fact that this only runs the first time someone calls initialize()
+        # means that some things which depend on it might be unreliable when
+        # used in an embedded perlbal if there is a race for multiple components
+        # to call initialize().
+        run_global_hook("pre_event_loop");
+    }
+}
+
+# This is the function to call if you want Perlbal to be in charge of the event loop.
+# It won't return until Perlbal is somehow told to exit.
 sub run {
-    $run_started = 1;
 
     # setup for logging
     Sys::Syslog::openlog('perlbal', 'pid', 'daemon') if $Perlbal::SYSLOG_AVAILABLE;
+    $Perlbal::syslog_open = 1;
     Perlbal::log('info', 'beginning run');
     my $pidfile_written = 0;
     $pidfile_written = _write_pidfile( $pidfile ) if $pidfile;
 
-    # number of AIO threads.  the number of outstanding requests isn't
-    # affected by this
-    IO::AIO::min_parallel(3)    if $Perlbal::OPTMOD_IO_AIO;
-
-    # register IO::AIO pipe which gets written to from threads
-    # doing blocking IO
-    if ($Perlbal::OPTMOD_IO_AIO) {
-        Perlbal::Socket->AddOtherFds(IO::AIO::poll_fileno() =>
-                                     \&IO::AIO::poll_cb);
-    }
-
+    Perlbal::initialize();
 
     Danga::Socket->SetLoopTimeout(1000);
     Danga::Socket->SetPostLoopCallback(sub {
@@ -1211,8 +1253,6 @@ sub run {
         Perlbal::Socket::run_callbacks();
         return 1;
     });
-
-    run_global_hook("pre_event_loop");
 
     # begin the overall loop to try to capture if Perlbal dies at some point
     # so we can have a log of it
@@ -1235,6 +1275,7 @@ sub run {
     _remove_pidfile( $pidfile ) if $pidfile_written;
 
     Perlbal::log('info', 'ending run');
+    $Perlbal::syslog_open = 0;
     Sys::Syslog::closelog() if $Perlbal::SYSLOG_AVAILABLE;
 
     return $clean_exit;
@@ -1248,7 +1289,7 @@ sub log {
         printf(shift(@_) . "\n", @_);
     } else {
         # just pass the parameters to syslog
-        Sys::Syslog::syslog(@_) if $Perlbal::SYSLOG_AVAILABLE;
+        Sys::Syslog::syslog(@_) if $Perlbal::syslog_open;
     }
 }
 

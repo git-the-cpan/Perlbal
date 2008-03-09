@@ -32,6 +32,10 @@ use fields (
             'read_size',       # total bytes read from client, ever
 
             'ditch_leading_rn', # if true, the next header parsing will ignore a leading \r\n
+
+            'observed_ip_string', # if defined, contains the observed IP string of the peer
+                                  # we're serving. this is intended for hoding the value of
+                                  # the X-Forwarded-For and using it to govern ACLs.
             );
 
 use constant MAX_HTTP_HEADER_LENGTH => 102400;  # 100k, arbitrary
@@ -297,6 +301,21 @@ sub die_gracefully {
     $self->{do_die} = 1;
 }
 
+### METHOD: write()
+### Overridden from Danga::Socket to update our alive time on successful writes
+### Stops sockets from being closed on long-running write operations
+sub write {
+    my $self = shift;
+
+    my $ret;
+    if ($ret = $self->SUPER::write(@_)) {
+        # Mark this socket alive so we don't time out
+        $self->{alive_time} = $Perlbal::tick_time;
+    }
+    
+    return $ret;
+}
+
 ### METHOD: close()
 ### Set our state when we get closed.
 sub close {
@@ -313,6 +332,16 @@ sub state {
 
     push @{$state_changes{"$self"} ||= []}, $_[0] if Perlbal::TRACK_STATES;
     return $self->{state} = $_[0];
+}
+
+sub observed_ip_string {
+    my Perlbal::Socket $self = shift;
+
+    if (@_) {
+        return $self->{observed_ip_string} = $_[0];
+    } else {
+        return $self->{observed_ip_string};
+    }
 }
 
 sub as_string_html {

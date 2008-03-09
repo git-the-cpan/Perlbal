@@ -11,6 +11,7 @@ use base "Perlbal::ClientHTTPBase";
 no  warnings qw(deprecated);
 
 use Perlbal::ChunkedUploadState;
+use Perlbal::Util;
 
 use fields (
             'backend',             # Perlbal::BackendHTTP object (or undef if disconnected)
@@ -59,14 +60,12 @@ my $udp_sock;
 
 # ClientProxy
 sub new {
-    my ($class, $service, $sock) = @_;
-
-    my $self = $class;
-    $self = fields::new($class) unless ref $self;
-    $self->SUPER::new($service, $sock);       # init base fields
+    my Perlbal::ClientProxy $self = shift;
+    my ($service, $sock) = @_;
+    $self = fields::new($self) unless ref $self;
+    $self->SUPER::new($service,  $sock );
 
     Perlbal::objctor($self);
-    bless $self, ref $class || $class;
 
     $self->init;
     $self->watch_read(1);
@@ -76,7 +75,7 @@ sub new {
 sub new_from_base {
     my $class = shift;
     my Perlbal::ClientHTTPBase $cb = shift;
-    bless $cb, $class;
+    Perlbal::Util::rebless($cb, $class);
     $cb->init;
     $cb->watch_read(1);
     $cb->handle_request;
@@ -505,6 +504,12 @@ sub close {
     my Perlbal::ClientProxy $self = shift;
     my $reason = shift;
 
+    warn sprintf(
+                    "Perlbal::ClientProxy closed %s%s.\n",
+                    ( $self->{closed} ? "again " : "" ),
+                    (defined $reason ? "saying '$reason'" : "for an unknown reason")
+    ) if Perlbal::DEBUG >= 2;
+
     # don't close twice
     return if $self->{closed};
 
@@ -729,6 +734,13 @@ sub event_read {
 sub handle_request {
     my Perlbal::ClientProxy $self = shift;
     my $req_hd = $self->{req_headers};
+
+    unless ($req_hd) {
+        $self->close("handle_request without headers");
+        return;
+    }
+
+    $self->check_req_headers;
 
     my $svc = $self->{service};
     # give plugins a chance to force us to bail
@@ -1008,7 +1020,7 @@ sub send_buffered_upload {
 
     # reset our position so we start reading from the right spot
     $self->{buoutpos} = 0;
-    sysseek($self->{bufh}, 0, 0);
+    sysseek($self->{bufh}, 0, 0) if ($self->{bufh}); # But only if it exists at all
 
     # notify that we want the backend so we get the ball rolling
     $self->request_backend;
@@ -1022,14 +1034,16 @@ sub continue_buffered_upload {
     # now send the data
     my $clen = $self->{request_body_length};
 
-    my $sent = Perlbal::Socket::sendfile($be->{fd}, fileno($self->{bufh}), $clen - $self->{buoutpos});
-    if ($sent < 0) {
-        return $self->close("epipe") if $! == EPIPE;
-        return $self->close("connreset") if $! == ECONNRESET;
-        print STDERR "Error w/ sendfile: $!\n";
-        return $self->close('sendfile_error');
+    if ($self->{buoutpos} < $clen) {
+        my $sent = Perlbal::Socket::sendfile($be->{fd}, fileno($self->{bufh}), $clen - $self->{buoutpos});
+        if ($sent < 0) {
+            return $self->close("epipe") if $! == EPIPE;
+            return $self->close("connreset") if $! == ECONNRESET;
+            print STDERR "Error w/ sendfile: $!\n";
+            return $self->close('sendfile_error');
+        }
+        $self->{buoutpos} += $sent;
     }
-    $self->{buoutpos} += $sent;
 
     # if we're done, purge the file and move on
     if ($self->{buoutpos} >= $clen) {
@@ -1142,6 +1156,9 @@ sub buffered_upload_update {
 # destroy any files we've created
 sub purge_buffered_upload {
     my Perlbal::ClientProxy $self = shift;
+
+    # Main reason for failure below is a 0-length chunked upload, where the file is never created.
+    return unless $self->{bufh};
 
     # FIXME: it's reported that sometimes the two now-in-eval blocks
     # fail, hence the eval blocks and warnings.  the FIXME is to
