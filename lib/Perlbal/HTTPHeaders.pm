@@ -265,6 +265,11 @@ sub header {
     return $self->{headers}{$key} = shift;
 }
 
+sub headers_list {
+    my Perlbal::HTTPHeaders $self = shift;
+    return [$self->{headers} ? keys %{ $self->{headers} } : ()];
+}
+
 sub to_string_ref {
     my Perlbal::HTTPHeaders $self = shift;
     my $st = join("\r\n",
@@ -427,7 +432,7 @@ sub res_keep_alive {
 
 # returns (status, range_start, range_end) when given a size
 # status = 200 - invalid or non-existent range header.  serve normally.
-# status = 206 - parsable range is good.  serve partial content.
+# status = 206 - parseable range is good.  serve partial content.
 # status = 416 - Range is unsatisfiable
 sub range {
     my Perlbal::HTTPHeaders $self = $_[0];

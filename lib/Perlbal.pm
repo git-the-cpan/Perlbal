@@ -33,7 +33,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.70';
+$VERSION = '1.71';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -960,6 +960,16 @@ sub MANAGE_server {
         return $mc->ok;
     }
 
+    if ($key eq "crash_backtrace") {
+        return $mc->err("Expected 1 or 0") unless $val eq '1' || $val eq '0';
+        if ($val) {
+            $SIG{__DIE__} = sub { Carp::confess(@_) };
+        } else {
+            $SIG{__DIE__} = undef;
+        }
+        return $mc->ok;
+    }
+
     return $mc->err("unknown server option '$val'");
 }
 
@@ -1187,7 +1197,7 @@ sub daemonize {
     croak "Cannot detach from controlling terminal"
         unless $sess_id = POSIX::setsid();
 
-    ## Prevent possibility of acquiring a controling terminal
+    ## Prevent possibility of acquiring a controlling terminal
     $SIG{'HUP'} = 'IGNORE';
     if ($pid = fork) { exit 0; }
 
