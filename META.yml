@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:                Perlbal
-version:             1.71
+version:             1.72
 abstract:            Reverse-proxy load balancer and webserver
 license:             ~
 author:              
