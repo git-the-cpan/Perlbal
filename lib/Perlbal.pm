@@ -33,7 +33,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.72';
+$VERSION = '1.73';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -263,6 +263,7 @@ sub run_manage_command {
 
     # expand variables
     $cmd =~ s/\$\{(.+?)\}/_expand_config_var($1)/eg;
+    $cmd =~ s/\$(\w+)/$ENV{$1}/g;
 
     $out ||= sub {};
     $ctx ||= Perlbal::CommandContext->new;
@@ -973,6 +974,45 @@ sub MANAGE_server {
     return $mc->err("unknown server option '$val'");
 }
 
+sub MANAGE_dumpconfig {
+    my $mc = shift;
+
+    while (my ($name, $pool) = each %pool) {
+        $mc->out("CREATE POOL $name");
+
+        if ($pool->can("dumpconfig")) {
+            foreach my $line ($pool->dumpconfig) {
+                $mc->out("  $line");
+            }
+        } else {
+            my $class = ref($pool);
+            $mc->out("  # Pool class '$class' is unable to dump config.");
+        }
+    } continue {
+        $mc->out("");
+    }
+
+    while (my ($name, $service) = each %service) {
+        $mc->out("CREATE SERVICE $name");
+
+        if ($service->can("dumpconfig")) {
+            foreach my $line ($service->dumpconfig) {
+                $mc->out("  $line");
+            }
+        } else {
+            my $class = ref($service);
+            $mc->out("  # Service class '$class' is unable to dump config.");
+        }
+
+        my $state = $service->{enabled} ? "ENABLE" : "DISABLE";
+        $mc->out("$state $name");
+    } continue {
+        $mc->out("");
+    }
+
+    return $mc->ok
+}
+
 sub MANAGE_reproxy_state {
     my $mc = shift;
     Perlbal::ReproxyManager::dump_state($mc->out);
@@ -1173,7 +1213,6 @@ sub load_config {
     my $ctx = Perlbal::CommandContext->new;
     $ctx->verbose(0);
     while (my $line = <$fh>) {
-        $line =~ s/\$(\w+)/$ENV{$1}/g;
         return 0 unless run_manage_command($line, $writer, $ctx);
     }
     close($fh);
@@ -1295,7 +1334,7 @@ sub log {
     # simple logging functionality
     if ($foreground) {
         # syslog acts like printf so we have to use printf and append a \n
-        shift; # ignore the first parameter (info, warn, critical, etc)
+        shift; # ignore the first parameter (info, warn, crit, etc)
         printf(shift(@_) . "\n", @_);
     } else {
         # just pass the parameters to syslog

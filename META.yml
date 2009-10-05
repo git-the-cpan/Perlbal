@@ -1,13 +1,10 @@
---- #YAML:1.0
-name:                Perlbal
-version:             1.72
-abstract:            Reverse-proxy load balancer and webserver
-license:             ~
-author:              
-    - Brad Fitzpatrick <brad@danga.com>
-generated_by:        ExtUtils::MakeMaker version 6.44
-distribution_type:   module
-requires:     
+# http://module-build.sourceforge.net/META-spec.html
+#XXXXXXX This is a prototype!!!  It will change in the future!!! XXXXX#
+name:         Perlbal
+version:      1.73
+version_from: lib/Perlbal.pm
+installdirs:  site
+requires:
     BSD::Resource:                 0
     Danga::Socket:                 1.44
     File::Find:                    0
@@ -16,6 +13,6 @@ requires:
     Sys::Syscall:                  0
     Test::More:                    0
     Time::HiRes:                   0
-meta-spec:
-    url:     http://module-build.sourceforge.net/META-spec-v1.3.html
-    version: 1.3
+
+distribution_type: module
+generated_by: ExtUtils::MakeMaker version 6.30

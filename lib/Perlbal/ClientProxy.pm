@@ -443,6 +443,13 @@ sub backend_finished {
     $self->close("backend_finished_while_unread_data");
 }
 
+# Called when this client is entering a persist_wait state, but before we are returned to base.
+sub persist_wait {
+    my Perlbal::ClientProxy $self = $_[0];
+    # We're in keepalive, and just completed a proxy request
+    $self->{service}->run_hooks('end_proxy_request', $self);
+}
+
 # called when we've sent a response to a user fully and we need to reset state
 sub http_response_sent {
     my Perlbal::ClientProxy $self = $_[0];
@@ -548,11 +555,12 @@ sub event_write {
     my Perlbal::ClientProxy $self = shift;
     print "ClientProxy::event_write\n" if Perlbal::DEBUG >= 3;
 
-    $self->SUPER::event_write;
-
     # obviously if we're writing the backend has processed our request
     # and we are responding/have responded to the user, so mark it so
     $self->{responded} = 1;
+
+    # will eventually, finally reset the whole object on completion
+    $self->SUPER::event_write;
 
     # trigger our backend to keep reading, if it's still connected
     if ($self->{backend_stalled} && (my $backend = $self->{backend})) {
@@ -1021,7 +1029,7 @@ sub send_buffered_upload {
 
     my $clen = $self->{req_headers}->content_length;
     if ($clen != $self->{buoutpos}) {
-        Perlbal::log('critical', "Content length of $clen declared but $self->{buoutpos} bytes written to disk");
+        Perlbal::log('crit', "Content length of $clen declared but $self->{buoutpos} bytes written to disk");
         return $self->_simple_response(500);
     }
 
@@ -1082,7 +1090,7 @@ sub buffered_upload_update {
 
             # throw errors back to the user
             if (! $self->{bufh}) {
-                Perlbal::log('critical', "Failure to open $fn for buffered upload output");
+                Perlbal::log('crit', "Failure to open $fn for buffered upload output");
                 return $self->_simple_response(500);
             }
 
@@ -1117,8 +1125,8 @@ sub buffered_upload_update {
         $self->{is_writing} = 0;
 
         # check for error
-        unless ($bytes) {
-            Perlbal::log('critical', "Error writing buffered upload: $!.  Tried to do $len bytes at $self->{buoutpos}.");
+        unless ($bytes > 0) {
+            Perlbal::log('crit', "Error writing buffered upload: $!.  Tried to do $len bytes at $self->{buoutpos}.");
             return $self->_simple_response(500);
         }
 

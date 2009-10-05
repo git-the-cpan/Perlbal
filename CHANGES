@@ -1,3 +1,50 @@
+1.73: 2009-10-05
+
+    -- Add 'dumpconfig' command and related framework.
+       *** BETA FEATURE STATUS ***
+
+    -- Fix obscure race condition (spontaneously closed keepalives
+       after POST requests, Andreas J Koenig)
+
+    -- make Perlbal::Test be more robust and only use free ports.
+       (Bart van der Schans <herengracht@gmail.com>)
+
+    -- Make Content-Range replies work (Ask Bjørn Hansen) 
+
+    -- Make Redirect plugin more standards compliant (Ask Bjørn Hansen)
+
+    -- Fix X-REPROXY-FILE to work with SSL connections (Greg Denton)
+
+    -- Syslog as 'crit' rather than 'critical' (noticed by Richard Bronosky)
+
+    -- Allow zero byte PUT requests (in normal PUT situations)
+
+    -- Fix for serving files from the filesystem over SSL (Greg Denton) 
+
+    -- Beginnings of IPv6 support.  You can now set 'listen' to just a port
+       number and if you have IPv6 setup, have IO::Socket::INET6, and have
+       Danga::Socket 1.61, it'll listen on both IPv6 and IPv4 on that port.
+       (the equivalent to 0.0.0.0).  By default, with the old required syntax
+       of 'listen' being n.n.n.n:port, that'll force IPv4 mode and there are
+       no changes.  Even without IPv6 support, you can now listen on a port
+       without specifying e.g. 0.0.0.0:80.  Currently unimplemented: listening
+       on specific IPv6 addresses, connecting to IPv6 backends, etc.
+       (Brad Fitzpatrick <brad@danga.com>)
+
+    -- support filenames with +'s in webserver mode (Jordi Funollet).
+
+    -- change the VHost plugin to treat 'www.example.com.' and
+       'www.example.com' the same. (Ask)
+
+    -- silence warnings when things that look like variables on comment lines
+       in config input.
+
+    -- silence warnings from mgmt system when showing an object that doesn't
+       have a listening socket.
+
+    -- don't fail on t/90-accesscontrol.t if Net::Netmask isn't
+       installed. (Boris Zentner <bzm@2bz.de>)
+
 1.72: 2008-09-21
 
     -- Removed version check in Plugin/Include.pm
