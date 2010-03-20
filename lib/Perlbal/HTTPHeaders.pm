@@ -107,7 +107,7 @@ sub new {
 
         # check for valid response line
         return fail("Bogus response line") unless
-            $self->{responseLine} =~ m!^HTTP\/(\d+)\.(\d+)\s+(\d+)\s+(.*)$!;
+            $self->{responseLine} =~ m!^HTTP\/(\d+)\.(\d+)\s+(\d+)(?:\s+(.*))$!;
 
         my ($ver_ma, $ver_mi, $code) = ($1, $2, $3);
         $self->code($code, $4);
@@ -269,7 +269,8 @@ sub header {
 
 sub headers_list {
     my Perlbal::HTTPHeaders $self = shift;
-    return [$self->{headers} ? keys %{ $self->{headers} } : ()];
+    return [] unless $self->{headers};
+    return [ map { $self->{origcase}{$_} } keys %{$self->{headers}} ];
 }
 
 sub to_string_ref {

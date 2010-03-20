@@ -57,7 +57,8 @@ use fields (
             'reproxy_cache_maxsize', # int; maximum number of reproxy results to be cached. (0 is disabled and default)
             'client_sndbuf_size',    # int: bytes for SO_SNDBUF
             'server_process' ,       # scalar: path to server process (executable)
-            'persist_client_timeout',  # int: keep-alive timeout in seconds for clients (default is 30)
+            'persist_client_idle_timeout',  # int: keep-alive timeout in seconds for clients (default is 30)
+            'idle_timeout',                 # int: idle timeout outside of keep-alive time (default is 30)
 
             # Internal state:
             'waiting_clients',         # arrayref of clients waiting for backendhttp conns
@@ -94,6 +95,8 @@ use fields (
             'ssl_key_file',       # file:  path to key pem file
             'ssl_cert_file',      # file:  path to key pem file
             'ssl_cipher_list',    # OpenSSL cipher list string
+            'ssl_ca_path',        # directory:  path to certificates
+            'ssl_verify_mode',    # int:  verification mode, see IO::Socket::SSL documentation 
 
             'enable_error_retries',  # bool: whether we should retry requests after errors
             'error_retry_schedule',  # string of comma-separated seconds (full or partial) to delay between retries
@@ -295,7 +298,7 @@ our $tunables = {
     },
 
     'upload_status_listeners' => {
-        des => "Comma separated list of hosts in form 'a.b.c.d:port' which will receive UDP upload status packets no faster than once a second per HTTP request (PUT/POST) from clients that have requested an upload status bar, which they request by appending the URL get argument ?client_up_session=[xxxxxx] where xxxxx is 5-50 'word' characters (a-z, A-Z, 0-9, underscore).",
+        des => "Comma separated list of hosts in form 'a.b.c.d:port' which will receive UDP upload status packets no faster than once a second per HTTP request (PUT/POST) from clients that have requested an upload status bar, which they request by appending the URL get argument ?client_up_sess=[xxxxxx] where xxxxx is 5-50 'word' characters (a-z, A-Z, 0-9, underscore).",
         default => "",
         check_role => "reverse_proxy",
         check_type => sub {
@@ -404,6 +407,7 @@ our $tunables = {
         },
         dumper => sub {
             my ($self, $val) = @_;
+            return unless defined $val;
             return join(', ', @$val);
         },
     },
@@ -471,12 +475,32 @@ our $tunables = {
     },
 
     'persist_client_timeout' => {
+        des => "Set both the persist_client_idle_timeout and idle_timeout (deprecated)",
+        check_type => "int",
+        check_role => "*",
+        setter => sub {
+            my ($self, $val, $set, $mc) = @_;
+            $self->{persist_client_idle_timeout} = $val;
+            $self->{idle_timeout} = $val;
+            return $mc->ok;
+        },
+        dump_ignore => 1,
+    },
+
+    'persist_client_idle_timeout' => {
         des => "Timeout in seconds for HTTP keep-alives to the end user (default is 30)",
         check_type => "int",
         default => 30,
         check_role => "*",
     },
-    
+
+    'idle_timeout' => {
+        des => "Timeout in seconds for idle connections to the end user (default is 30)",
+        check_type => "int",
+        default => 30,
+        check_role => "*",
+    },
+
     'buffer_uploads_path' => {
         des => "Directory root for storing files used to buffer uploads.",
 
@@ -550,6 +574,20 @@ our $tunables = {
     'ssl_cipher_list' => {
         des => "OpenSSL-style cipher list.",
         default => "ALL:!LOW:!EXP",
+        check_role => "*",
+    },
+
+    'ssl_ca_path' => {
+        des => 'Path to directory containing certificates for SSL.',
+        default => undef,
+        check_type => "directory_or_none",
+        check_role => "*",
+    },
+
+    'ssl_verify_mode' => {
+        des => 'SSL verification mode',
+        default => 0,
+        check_type => "int",
         check_role => "*",
     },
 
@@ -667,7 +705,10 @@ sub dumpconfig {
 
     foreach my $setting ("role", "listen", "pool", sort keys %my_tunables) {
         my $attrs = $tunables->{$setting};
-        my $value = $self->{$setting};
+
+        next if $attrs->{dump_ignore};
+
+        my $value = $attrs->{_plugin_inserted} ? $self->{extra_config}->{$setting} : $self->{$setting};
 
         my $check_role = $attrs->{check_role};
         my $check_type = $attrs->{check_type};
@@ -813,20 +854,26 @@ sub set {
                 return $mc->err("File '$val' not found for '$key'") unless -f $val;
             } elsif ($req_type eq "file_or_none") {
                 return $mc->err("File '$val' not found for '$key'") unless -f $val || $val eq $tun->{default};
+            } elsif ($req_type eq "directory_or_none") {
+                return $mc->err("Directory '$val' not found for '$key'") unless !defined $val || -d $val;
             } else {
                 die "Unknown check_type: $req_type\n";
             }
+        }
+
+        if ($tun->{_plugin_inserted}) {
+            # plugins that add tunables need to be stored in the extra_config hash due to the main object
+            # using fields.  this passthrough is done so the config files don't need to specify this.
+            $set = sub {
+                $self->{extra_config}->{$key} = $val;
+                return $mc->ok;
+            };
         }
 
         my $setter = $tun->{setter};
 
         if (ref $setter eq "CODE") {
             return $setter->($self, $val, $set, $mc);
-        } elsif ($tun->{_plugin_inserted}) {
-            # plugins that add tunables need to be stored in the extra_config hash due to the main object
-            # using fields.  this passthrough is done so the config files don't need to specify this.
-            $self->{extra_config}->{$key} = $val;
-            return $mc->ok;
         } else {
             return $set->();
         }
@@ -1412,7 +1459,6 @@ sub header_management {
     my ($mode, $key, $val, $mc) = @_;
     return $mc->err("no header provided") unless $key;
     return $mc->err("no value provided")  unless $val || $mode eq 'remove';
-    return $mc->err("only valid on reverse_proxy services") unless $self->{role} eq 'reverse_proxy';
 
     if ($mode eq 'insert') {
         push @{$self->{extra_headers}->{insert}}, [ $key, $val ];
@@ -1460,10 +1506,23 @@ sub selector {
     return $self->{selector};
 }
 
+# This is called anytime a client is leaving this service to be another service.
+sub release_client {
+    my Perlbal::Service $self = shift;
+    my Perlbal::ClientHTTPBase $cb = shift;
+
+    $self->munge_headers($cb->{req_headers});
+    return;
+}
+
 # given a base client from a 'selector' role, down-cast it to its specific type
 sub adopt_base_client {
     my Perlbal::Service $self = shift;
     my Perlbal::ClientHTTPBase $cb = shift;
+
+    if (my $orig_service = $cb->{service}) {
+        $orig_service->release_client($cb);
+    }
 
     $cb->{service} = $self;
 
@@ -1474,7 +1533,7 @@ sub adopt_base_client {
         Perlbal::ClientProxy->new_from_base($cb);
         return;
     } elsif ($self->{'role'} eq "selector") {
-        $self->selector()->($cb);
+        Perlbal::ClientHTTPBase->new_from_base($cb);
         return;
     } else {
         $cb->_simple_response(500, "Can't map to service type $self->{'role'}");
@@ -1520,6 +1579,8 @@ sub enable {
                 SSL_key_file    => $self->{ssl_key_file},
                 SSL_cert_file   => $self->{ssl_cert_file},
                 SSL_cipher_list => $self->{ssl_cipher_list},
+                (defined $self->{ssl_ca_path} ? (SSL_ca_path => $self->{ssl_ca_path}) : ()),
+                (defined $self->{ssl_verify_mode} ? (SSL_verify_mode => $self->{ssl_verify_mode}) : ()),
             };
             return $mc->err("IO::Socket:SSL (0.97+) not available.  Can't do SSL.") unless eval "use IO::Socket::SSL 0.97 (); 1;";
             return $mc->err("SSL key file ($self->{ssl_key_file}) doesn't exist")   unless -f $self->{ssl_key_file};

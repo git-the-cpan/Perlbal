@@ -55,7 +55,6 @@ lib/Perlbal/UploadListener.pm
 lib/Perlbal/Util.pm
 Makefile.PL
 MANIFEST
-META.yml			Module meta-data (added by MakeMaker)
 perlbal
 t/00-use.t
 t/10-testharness.t
@@ -76,4 +75,6 @@ t/52-chunked-upload.t
 t/60-child-httpd.t
 t/75-plugin-include.t
 t/90-accesscontrol.t
+t/76-plugin-redirect.t
 t/helper/child-httpd.pl
+META.yml                                 Module meta-data (added by MakeMaker)

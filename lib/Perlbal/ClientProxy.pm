@@ -183,8 +183,17 @@ sub start_reproxy_uri {
 sub try_next_uri {
     my Perlbal::ClientProxy $self = $_[0];
 
-    shift @{$self->{reproxy_uris}};
+    if ($self->{currently_reproxying}) {
+        # If we're currently reproxying to a backend, that means we want to try the next uri which is
+        # ->{reproxy_uris}->[0].
+    } else {
+        # Since we're not currently reproxying, that means we never got a backend in the first place,
+        # so we want to move on to the next uri which is ->{reproxy_uris}->[1] (shift one off)
+        shift @{$self->{reproxy_uris}};
+    }
+
     $self->{currently_reproxying} = undef;
+
     $self->start_reproxy_uri();
 }
 
@@ -251,10 +260,6 @@ sub backend_response_received {
     my Perlbal::ClientProxy $self = $_[0];
     my Perlbal::BackendHTTP $be = $_[1];
 
-    # a response means that we are no longer currently waiting on a reproxy, and
-    # don't want to retry this URI
-    $self->{currently_reproxying} = undef;
-
     # we fail if we got something that's NOT a 2xx code, OR, if we expected
     # a certain size and got back something different
     my $code = $be->{res_headers}->response_code + 0;
@@ -277,6 +282,11 @@ sub backend_response_received {
         $self->try_next_uri;
         return 1;
     }
+
+    # a response means that we are no longer currently waiting on a reproxy, and
+    # don't want to retry this URI
+    $self->{currently_reproxying} = undef;
+
     return 0;
 }
 
@@ -879,8 +889,9 @@ sub satisfy_request_from_cache {
 
         # If 'Last-Modified' is same as 'If-Modified-Since', send a 304
         if ($ims eq $lm) {
-            my $res_hd = Perlbal::HTTPHeaders->new_response(304);
+            my $res_hd = $self->{res_headers} = Perlbal::HTTPHeaders->new_response(304);
             $res_hd->header("Content-Length", "0");
+            $self->setup_keepalive($res_hd);
             $self->tcp_cork(1);
             $self->state('xfer_resp');
             $self->write($res_hd->to_string_ref);

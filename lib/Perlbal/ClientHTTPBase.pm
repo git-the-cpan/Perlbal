@@ -36,6 +36,7 @@ use fields ('service',             # Perlbal::Service object
 
             # service selector parent
             'selector_svc',        # the original service from which we came
+            'is_ssl',              # Is this socket SSL attached (restricted operations)
             );
 
 use Fcntl ':mode';
@@ -76,11 +77,21 @@ sub new {
     $self->{requests}        = 0;
     $self->{scratch}         = {};
     $self->{selector_svc}    = $selector_svc;
+    $self->{is_ssl}          = 0;
 
     $self->state('reading_headers');
 
     $self->watch_read(1);
     return $self;
+}
+
+sub new_from_base {
+    my $class = shift;
+    my Perlbal::ClientHTTPBase $cb = shift;    # base object
+    Perlbal::Util::rebless($cb, $class);
+
+    $cb->handle_request;
+    return $cb;
 }
 
 sub close {
@@ -109,6 +120,7 @@ sub setup_keepalive {
     # now get the headers we're using
     my Perlbal::HTTPHeaders $reshd = $_[1];
     my Perlbal::HTTPHeaders $rqhd = $self->{req_headers};
+    my $override_value = $_[2];
 
     # for now, we enforce outgoing HTTP 1.0
     $reshd->set_version("1.0");
@@ -117,13 +129,14 @@ sub setup_keepalive {
     # we respect for persist_client
     my $svc = $self->{selector_svc} || $self->{service};
     my $persist_client = $svc->{persist_client} || 0;
+    $persist_client = $override_value if defined $override_value;
     print "  service's persist_client = $persist_client\n" if Perlbal::DEBUG >= 3;
 
     # do keep alive if they sent content-length or it's a head request
     my $do_keepalive = $persist_client && $rqhd->req_keep_alive($reshd);
     if ($do_keepalive) {
         print "  doing keep-alive to client\n" if Perlbal::DEBUG >= 3;
-        my $timeout = $self->{service}->{persist_client_timeout};
+        my $timeout = $self->{service}->{persist_client_idle_timeout};
         $reshd->header('Connection', 'keep-alive');
         $reshd->header('Keep-Alive', $timeout ? "timeout=$timeout, max=100" : undef);
     } else {
@@ -139,7 +152,12 @@ sub setup_keepalive {
 
 # overridden here from Perlbal::Socket to use the service value
 sub max_idle_time {
-    return $_[0]->{service}->{persist_client_timeout};
+    my Perlbal::ClientHTTPBase $self = shift;
+    if ($self->state eq 'persist_wait') {
+        return $self->{service}->{persist_client_idle_timeout};
+    } else {
+        return $self->{service}->{idle_timeout};
+    }
 }
 
 # Called when this client is entering a persist_wait state, but before we are returned to base.
@@ -272,7 +290,16 @@ sub event_read {
         if $self->{req_headers};
 
     my $hd = $self->read_request_headers;
+    $self->handle_request;
+}
+
+sub handle_request {
+    my Perlbal::ClientHTTPBase $self = shift;
+    my Perlbal::HTTPHeaders $hd = $self->{req_headers};
+
     return unless $hd;
+
+    $self->check_req_headers;
 
     return if $self->{service}->run_hook('start_http_request', $self);
 
@@ -323,7 +350,7 @@ sub event_write_reproxy_fh {
     $self->tcp_cork(1) if $self->{reproxy_file_offset} == 0;
     $self->watch_write(0);
 
-    if ($self->{service}->{listener}->{sslopts}) { # SSL (sendfile does not do SSL)
+    if ($self->{is_ssl}) { # SSL (sendfile does not do SSL)
         return if $self->{closed};
         if ($remain <= 0) { #done
             print "REPROXY SSL done\n" if Perlbal::DEBUG >= 2;
@@ -849,6 +876,45 @@ sub send_response {
     $self->watch_read(0);
     $self->watch_write(1);
     return $self->_simple_response(@_);
+}
+
+sub send_full_response {
+    my Perlbal::ClientHTTPBase $self = shift;
+    my $code = shift;
+    my $headers = shift || [];
+    my $bref = ref($_[0]) eq 'SCALAR' ? shift : \shift;
+    my $options = shift || {};
+
+    my $res = $self->{res_headers} = Perlbal::HTTPHeaders->new_response($code);
+
+    while (@$headers) {
+        my ($name, $value) = splice @$headers, 0, 2;
+        $res->header($name, $value);
+    }
+
+    if ($code == 204 || $code == 304) {
+        $res->header('Content-Length', undef);
+        $bref = \undef;
+    } elsif (defined $$bref) {
+        $res->header('Content-Length', length($$bref));
+    }
+
+    $res->header('Server', 'Perlbal'); # Tunable?
+    # $res->header('Date', # We should do this
+
+    $self->setup_keepalive($res, $options->{persist_client});
+
+    $self->state('xfer_resp');
+    $self->tcp_cork(1);  # cork writes to self
+    $self->write($res->to_string_ref);
+
+    if (defined $$bref && $self->{req_headers} && $self->{req_headers}->request_method ne 'HEAD') {
+        # don't write body for head requests
+        $self->write($bref);
+    }
+
+    $self->write(sub { $self->http_response_sent; });
+    return 1;
 }
 
 # method that sends a 500 to the user but logs it and any extra information

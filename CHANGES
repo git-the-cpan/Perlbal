@@ -1,3 +1,63 @@
+1.74: 2010-03-20
+
+    -- Change headers->headers_list method to return original case for PP
+
+    -- Add Slaven Rezic's SSL Client cert verification patch.
+
+    -- Change all the example configs to use a lower port
+       (Andreas J Koenig <andreas.j.koenig@gmail.com>)
+
+    -- Fix typo in help for MIME command (Jeremy James <jeremy.james@gmail.com>)
+
+    -- Allow HEADER command on all service roles
+
+    -- Switch Redirect plugin to use ->send_full_response, which fixes
+       keep-alive handling for this plugin.
+
+    -- Add a ClientHTTPBase method ->send_full_response, which is intended
+       as a plugin's interface to send full http responses back while still
+       having perlbal handle things like keepalives correctly.
+
+    -- Make keep-alive results during reproxy work even if the initial
+       response doesn't have a content-length.
+
+    -- Fix SSL socket close race crash.  (Jab <jk@ciphron.de>)
+
+    -- Make service selectors have the 'observed_ip' concept available to
+       them.
+
+    -- Add extra_config awareness for plugin added tunables to dumpconfig.
+
+    -- Plugins may now use the $set argument of add_tunable's interface
+       to automatically set an extra_config value from within a setter
+       override. Previously this would result in an error.
+
+    -- Split the persist_client_timeout into two other options;
+       persist_client_idle_timeout and idle_timeout. Depricate and
+       add compatability for the old option.
+
+    -- Silence a warning in PERLBAL_DEBUG >= 4 that we really don't
+       need to see.
+
+    -- Fix chained service selectors to have their 'start_http_request'
+       hook to be called.
+
+    -- Fix reproxy to not skip urls when the previous URL is a 'failure'
+       HTTP status response. IE. don't skip the second url when the first
+       one is a 404.
+
+    -- Don't require a space after the HTTP status in responses. In some
+       situations a server may not give it.
+
+    -- Perlbal::log should act the same whether it is calling syslog or
+       printf. Make it a little more DWIM.
+
+    -- Let's make SSL clients work with service selectors, and even
+       chained service selectors, when serving static files.
+
+    -- Fix a fields glitch in Perlbal::Cache which would sometimes
+       cause errors and abnormal shutdown.
+
 1.73: 2009-10-05
 
     -- Add 'dumpconfig' command and related framework.

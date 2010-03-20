@@ -33,7 +33,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.73';
+$VERSION = '1.74';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -198,7 +198,7 @@ sub service {
 sub create_service {
     my $class = shift;
     my $name = shift;
-    
+
     unless (defined($name)) {
         $name = "____auto_".($service_autonumber++);
     }
@@ -470,7 +470,7 @@ sub MANAGE_mime {
             return $mc->err("$arg1 not a defined extension.");
         }
     } else {
-        return $mc->err("Usage: list, remove <ext>, add <ext> <mime>");
+        return $mc->err("Usage: list, remove <ext>, set <ext> <mime>");
     }
 }
 
@@ -1126,22 +1126,46 @@ sub MANAGE_load {
     my $last_case;
     my $last_class;
 
-    my $load = sub {
-        my $name = shift;
+    my $good_error;
+
+    # TODO case protection
+
+    foreach my $name ($fn, lc $fn, ucfirst lc $fn) {
         $last_case = $name;
         my $class = $last_class = "Perlbal::Plugin::$name";
-        my $rv = eval "use $class; $class->load; 1;";
-        return $mc->err($@) if ! $rv && $@ !~ /^Can\'t locate/;
-        return $rv;
-    };
+        my $file = $class . ".pm";
+        $file =~ s!::!/!g;
 
-    my $rv = $load->($fn) || $load->(lc $fn) || $load->(ucfirst lc $fn);
-    return $mc->err($@) unless $rv;
+        my $rv = eval "use $class; 1;";
 
-    $PluginCase{lc $fn} = $last_case;
-    $plugins{$last_case} = $last_class;
+        if ($rv) {
+            $good_error = undef;
+            last;
+        }
 
-    return $mc->ok;
+        # If we don't have a good error yet, start with this one.
+        $good_error = $@ unless defined $good_error;
+
+        # If the file existed perl will place an entry in %INC (though it will be undef due to compilation error)
+        if (exists $INC{$file}) {
+            $good_error = $@;
+            last;
+        }
+    }
+
+    unless (defined $good_error) {
+        my $rv = eval "$last_class->load; 1;";
+
+        if ($rv) {
+            $PluginCase{lc $fn} = $last_case;
+            $plugins{$last_case} = $last_class;
+            return $mc->ok;
+        }
+
+        $good_error = $@;
+    }
+
+    return $mc->err($good_error);
 }
 
 sub MANAGE_reload {
@@ -1335,7 +1359,12 @@ sub log {
     if ($foreground) {
         # syslog acts like printf so we have to use printf and append a \n
         shift; # ignore the first parameter (info, warn, crit, etc)
-        printf(shift(@_) . "\n", @_);
+        my $message = shift;
+        if (@_) {
+            printf("$message\n", @_);
+        } else {
+            print("$message\n");
+        }
     } else {
         # just pass the parameters to syslog
         Sys::Syslog::syslog(@_) if $Perlbal::syslog_open;
