@@ -10,12 +10,21 @@ Perlbal - Reverse-proxy load balancer and webserver
 
 =head1 SEE ALSO
 
- http://www.danga.com/perlbal/
+L<http://www.danga.com/perlbal/>
+
+=head1 CONTRIBUTING
+
+Got a patch?  Or a bug report?  Instructions on how to contribute
+are located here:
+
+L<http://contributing.appspot.com/perlbal>
+
+Thanks!
 
 =head1 COPYRIGHT AND LICENSE
 
 Copyright 2004, Danga Interactive, Inc.
-Copyright 2005-2007, Six Apart, Ltd.
+Copyright 2005-2010, Six Apart, Ltd.
 
 You can use and redistribute Perlbal under the same terms as Perl itself.
 
@@ -33,7 +42,7 @@ my $has_cycle      = eval "use Devel::Cycle; 1;";
 use Devel::Peek;
 
 use vars qw($VERSION);
-$VERSION = '1.74';
+$VERSION = '1.75';
 
 use constant DEBUG => $ENV{PERLBAL_DEBUG} || 0;
 use constant DEBUG_OBJ => $ENV{PERLBAL_DEBUG_OBJ} || 0;
@@ -60,7 +69,7 @@ $Perlbal::syslog_open = 0;
 use Getopt::Long;
 use Carp qw(cluck croak);
 use Errno qw(EBADF);
-use POSIX ();
+use POSIX qw(SIG_BLOCK SIG_UNBLOCK SIGINT sigprocmask);
 
 our(%TrackVar);
 sub track_var {
@@ -1253,16 +1262,22 @@ sub daemonize {
     IO::AIO::max_parallel(0)
         if $Perlbal::OPTMOD_IO_AIO;
 
+    my $sigset = POSIX::SigSet->new(SIGINT);
+    sigprocmask(SIG_BLOCK, $sigset)
+        or die "Can't block sigint for fork: $!";
+
     ## Fork and exit parent
     if ($pid = fork) { exit 0; }
+
+    sigprocmask(SIG_UNBLOCK, $sigset)
+        or die "Can't unblock sigint after fork: $!";
 
     ## Detach ourselves from the terminal
     croak "Cannot detach from controlling terminal"
         unless $sess_id = POSIX::setsid();
 
-    ## Prevent possibility of acquiring a controlling terminal
-    $SIG{'HUP'} = 'IGNORE';
-    if ($pid = fork) { exit 0; }
+    # Handler for INT needs to be restored.
+    $SIG{INT} = 'DEFAULT';
 
     ## Change working directory
     chdir "/";
