@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Perlbal
-version:            1.75
+version:            1.76
 abstract:           Reverse-proxy load balancer and webserver
 author:
     - Brad Fitzpatrick <brad@danga.com>
@@ -23,7 +23,7 @@ no_index:
     directory:
         - t
         - inc
-generated_by:       ExtUtils::MakeMaker version 6.56
+generated_by:       ExtUtils::MakeMaker version 6.55_02
 meta-spec:
     url:      http://module-build.sourceforge.net/META-spec-v1.4.html
     version:  1.4
