@@ -1,3 +1,14 @@
+1.77: 2011-01-15
+
+    -- Import of the documentation project:
+       http://news.perlfoundation.org/2010/12/perlbal-documentation---final.html
+       (José Castro and Bruno Martins)
+
+    -- Make SSL sockets time out if they go stale during SSL negotiation. Fixes a
+       visible socket/object leak that slows down the server.
+
+    -- Refactor socket cleanup, might work better in environments that embed Perlbal.
+
 1.76: 2010-06-17
 
     -- Allow "0" as a HEADER ADD/SET value (Andreas Koenig)
