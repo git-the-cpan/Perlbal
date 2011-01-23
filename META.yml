@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Perlbal
-version:            1.77
+version:            1.78
 abstract:           Reverse-proxy load balancer and webserver
 author:
     - Brad Fitzpatrick <brad@danga.com>
