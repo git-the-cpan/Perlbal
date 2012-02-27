@@ -775,7 +775,7 @@ Int, 0-100; % chance to take a standard priority request when we're in pressure 
 
 =item trusted_upstream_proxies
 
-L<Net::Netmask> object containing netmasks for trusted upstreams.
+Array of L<Net::Netmask> objects containing netmasks for trusted upstreams.
 
 
 =item always_trusted
@@ -1007,6 +1007,11 @@ Comma-separated seconds (full or partial) to delay between retries.
 =item latency
 
 Milliseconds of latency to add to request.
+
+
+=item server_tokens
+
+Boolean; whether to provide a "Server" header.
 
 
 =item _stat_requests

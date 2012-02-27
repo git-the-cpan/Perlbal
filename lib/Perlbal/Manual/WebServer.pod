@@ -73,6 +73,13 @@ Decreases overall round-trip latency a bunch, but requires app to be modified to
 Default is false.
 
 
+=item B<enable_md5> = bool
+
+Enable verification of the Content-MD5 header in HTTP PUT requests.
+
+Default is true.
+
+
 =item B<enable_delete> = bool
 
 Enable HTTP DELETE requests.
@@ -106,6 +113,14 @@ Default is 0, which means there is no limit.
 If PUT requests are enabled, require this many levels of directories to already exist. If not, fail.
 
 Default is 0.
+
+=item B<server_tokens> = bool
+
+Whether to provide a "Server" header.
+
+Perlbal by default adds a header to all replies (such as the web_server role). By setting this default to "off", you can prevent Perlbal from identifying itself.
+
+Default is C<on>.
 
 
 =back

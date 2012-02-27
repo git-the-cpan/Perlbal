@@ -283,6 +283,8 @@ sub backend_response_received {
         return 1;
     }
 
+    return if $self->{service}->run_hook('reproxy_response_received', $be);
+
     # a response means that we are no longer currently waiting on a reproxy, and
     # don't want to retry this URI
     $self->{currently_reproxying} = undef;
@@ -546,6 +548,14 @@ sub close {
     # call ClientHTTPBase's close
     $self->SUPER::close($reason);
 }
+
+sub setup_keepalive {
+    my Perlbal::ClientProxy $self = $_[0];
+    my $not_done_reading = defined $self->{content_length_remain} && $self->{content_length_remain} > 0;
+
+    return $self->SUPER::setup_keepalive($_[1], $not_done_reading ? 0 : undef);
+}
+
 
 sub client_disconnected { # : void
     my Perlbal::ClientProxy $self = shift;
